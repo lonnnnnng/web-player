@@ -1,0 +1,12 @@
+# 统一换行符：shell 脚本必须 LF，批处理必须 CRLF
+* text=auto
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.py   text
+*.md   text
+*.json text
+*.html text
+*.css  text
+*.js   text
+*.log  text
+videos/* -text
