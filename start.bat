@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem Local Video Player - Windows launcher
+rem Local Media Player - Windows launcher (video + audio)
 rem Double-click to start. Console window shows server logs;
 rem press Ctrl+C or close the window to stop.
 rem ============================================================
@@ -30,7 +30,8 @@ if defined VIDEO_DIR set ARGS=%ARGS% --dir "%VIDEO_DIR%"
 if defined PORT set ARGS=%ARGS% --port %PORT%
 if defined PASSWORD set ARGS=%ARGS% --password "%PASSWORD%"
 
-echo Starting local video player on port %PORT% ...
+echo Starting local media player (video + audio) on port %PORT% ...
+echo The server banner below shows the access URLs (LAN IP).
 echo (Press Ctrl+C or close this window to stop)
 echo.
 %PY% server.py %ARGS%

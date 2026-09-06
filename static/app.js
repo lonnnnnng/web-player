@@ -111,7 +111,7 @@ function renderBreadcrumb(relPath) {
   bc.innerHTML = "";
   const parts = relPath ? relPath.split("/") : [];
   const rootLink = document.createElement(parts.length ? "a" : "span");
-  rootLink.textContent = "📺 视频根目录";
+  rootLink.textContent = "🎬 音视频根目录";
   if (parts.length) rootLink.href = "#/";
   else rootLink.className = "current";
   bc.appendChild(rootLink);

@@ -29,6 +29,45 @@ is_running() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
+# 从命令行参数 / config.json 推断端口（与服务端优先级一致）
+get_port() {
+    port=""
+    prev=""
+    for a in "$@"; do
+        case "$prev" in
+            --port|-p) port="$a" ;;
+        esac
+        case "$a" in
+            --port=*) port="${a#--port=}" ;;
+            -p?*) port="${a#-p}" ;;
+        esac
+        prev="$a"
+    done
+    if [ -z "$port" ] && [ -f "$SCRIPT_DIR/config.json" ]; then
+        port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$SCRIPT_DIR/config.json" | head -n 1)
+    fi
+    echo "${port:-8080}"
+}
+
+# 获取本机局域网 IP（复用服务端同款逻辑，python 是运行必需依赖）
+get_ip() {
+    "$PYTHON" -c "import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    s.connect(('8.8.8.8', 80))
+    print(s.getsockname()[0])
+except OSError:
+    print('127.0.0.1')" 2>/dev/null
+}
+
+print_urls() {
+    p=$(get_port "$@")
+    ip=$(get_ip)
+    echo "  访问地址 :"
+    echo "    本机   : http://127.0.0.1:$p/"
+    echo "    局域网 : http://$ip:$p/"
+}
+
 do_start() {
     if is_running; then
         echo "播放器已在运行 (PID $(cat "$PID_FILE"))，如需重启请执行: bash start.sh restart"
@@ -42,6 +81,7 @@ do_start() {
     if kill -0 "$pid" 2>/dev/null; then
         echo "=============================================="
         echo "  播放器已在后台启动 (PID $pid)"
+        print_urls "$@"
         echo "  日志文件 : $LOG_FILE"
         echo "  查看日志 : tail -f $LOG_FILE"
         echo "  停止服务 : bash start.sh stop"
@@ -97,6 +137,7 @@ case "$1" in
     fg|foreground)
         shift
         echo "前台运行模式，Ctrl+C 停止..."
+        print_urls "$@"
         exec "$PYTHON" "$SCRIPT_DIR/server.py" "$@"
         ;;
     *)

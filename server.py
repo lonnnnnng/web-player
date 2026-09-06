@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-本地视频在线播放器服务端
+本地音视频在线播放器服务端
 
 仅依赖 Python 标准库，无需 pip 安装任何东西。
 
 用法:
     python3 server.py                          # 使用 config.json / 默认目录 ./videos
-    python3 server.py --dir /data/movies       # 指定视频目录
+    python3 server.py --dir /data/movies       # 指定音视频资源目录
     python3 server.py --port 8080 --host 0.0.0.0
     python3 server.py --password mypass        # 开启简单密码保护(HTTP Basic)
 
@@ -19,8 +19,8 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
-import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -318,8 +318,24 @@ def load_config_file():
     return {}
 
 
+def get_local_ip():
+    """获取本机局域网 IP（UDP connect 不实际发包，仅确定路由）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except OSError:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
 def main():
-    parser = argparse.ArgumentParser(description="本地视频在线播放器")
+    parser = argparse.ArgumentParser(description="本地音视频在线播放器")
     parser.add_argument("--dir", "-d", help="视频资源目录（优先级最高）")
     parser.add_argument("--port", "-p", type=int, help="监听端口，默认 8080")
     parser.add_argument("--host", default=None, help="监听地址，默认 0.0.0.0")
@@ -351,12 +367,17 @@ def main():
         sys.exit(1)
 
     server = ThreadingHTTPServer((host, port), VideoRequestHandler)
-    print("=" * 50)
-    print("  本地视频播放器已启动")
-    print("  视频目录 : %s" % video_dir)
-    print("  监听地址 : http://%s:%d/" % (host if host != "0.0.0.0" else "0.0.0.0(所有网卡)", port))
-    print("  密码保护 : %s" % ("已启用" if password else "未启用"))
-    print("=" * 50)
+    lan_ip = get_local_ip()
+    print("=" * 56)
+    print("  本地音视频播放器已启动")
+    print("  资源目录   : %s" % video_dir)
+    print("  本机访问   : http://127.0.0.1:%d/" % port)
+    if host == "0.0.0.0" or host == "::":
+        print("  局域网访问 : http://%s:%d/" % (lan_ip, port))
+    print("  密码保护   : %s" % ("已启用" if password else "未启用"))
+    print("=" * 56)
+    # stdout 重定向到文件时是块缓冲，强制刷出保证横幅立即写入日志
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
