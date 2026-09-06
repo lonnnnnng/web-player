@@ -65,6 +65,12 @@ CONFIG = {
 }
 
 
+def natural_key(s):
+    """自然排序键：数字段按数值比较，"第2集"排在"第10集"前。"""
+    parts = re.split(r"(\d+)", s)
+    return tuple((0, int(p)) if p.isdigit() else (1, p.lower()) for p in parts if p)
+
+
 class VideoRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "VideoPlayer/1.0"
@@ -140,6 +146,8 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
         elif path == "/api/list":
             self.api_list(query)
+        elif path == "/api/search":
+            self.api_search(query)
         elif path == "/api/file":
             self.api_file(query, head_only=False)
         else:
@@ -221,10 +229,8 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
                 except OSError:
                     continue
 
-        dirs.sort(key=lambda x: x["name"].lower())
-        videos.sort(key=lambda x: x["name"].lower())
-        audios.sort(key=lambda x: x["name"].lower())
-        subs.sort(key=lambda x: x["name"].lower())
+        for lst in (dirs, videos, audios, subs):
+            lst.sort(key=lambda x: (natural_key(x["name"]), x["name"].lower()))
 
         self.send_json({
             "path": rel.strip("/"),
@@ -233,6 +239,47 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             "audios": audios,
             "subs": subs,
         })
+
+    # ---------- API: 全库搜索 ----------
+
+    def api_search(self, query):
+        kw = (query.get("q", [""])[0] or "").strip().lower()
+        if not kw:
+            self.send_json({"results": [], "truncated": False})
+            return
+        root = CONFIG["video_dir"]
+        limit = 200
+        results = []
+        truncated = False
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted((d for d in dirnames if not d.startswith(".")), key=natural_key)
+            rel_dir = os.path.relpath(dirpath, root)
+            rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+            for name in dirnames:
+                if kw in name.lower():
+                    results.append({"name": name, "type": "dir",
+                                    "path": rel_dir + "/" + name if rel_dir else name})
+            for name in sorted(filenames, key=natural_key):
+                if name.startswith(".") or kw not in name.lower():
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in VIDEO_EXTS and ext not in AUDIO_EXTS:
+                    continue
+                item = {"name": name, "type": "file", "ext": ext.lstrip("."),
+                        "path": rel_dir + "/" + name if rel_dir else name}
+                try:
+                    st = os.stat(os.path.join(dirpath, name))
+                    item["size"] = st.st_size
+                    item["mtime"] = int(st.st_mtime)
+                except OSError:
+                    pass
+                item["kind"] = "video" if ext in VIDEO_EXTS else "audio"
+                results.append(item)
+            if len(results) >= limit:
+                truncated = True
+                results = results[:limit]
+                break
+        self.send_json({"results": results, "truncated": truncated})
 
     # ---------- API: 文件流（支持 Range） ----------
 

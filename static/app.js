@@ -59,9 +59,10 @@ window.addEventListener("hashchange", render);
 
 /* ---------------- 浏览页 ---------------- */
 
-let currentListing = null;   // 当前目录数据
+let currentListing = null;   // 当前目录数据（播放页复用为同目录列表）
 let currentPath = "";
-let searchKeyword = "";
+let searchActive = false;    // 当前展示的是搜索结果还是目录列表
+let searchSeq = 0;           // 搜索请求序号，丢弃过期响应
 
 const durationObserver = new IntersectionObserver((entries) => {
   for (const en of entries) {
@@ -83,7 +84,8 @@ const durationObserver = new IntersectionObserver((entries) => {
 
 async function renderBrowse(relPath) {
   currentPath = relPath;
-  searchKeyword = "";
+  searchActive = false;
+  searchSeq++;               // 作废在途搜索响应
   $("#search-box").value = "";
 
   let data;
@@ -170,15 +172,12 @@ function renderGrid() {
   durationObserver.disconnect();
 
   if (!currentListing) return;
-  const kw = searchKeyword.trim().toLowerCase();
-  const match = (name) => !kw || name.toLowerCase().includes(kw);
-
-  const dirs = currentListing.dirs.filter(d => match(d.name));
-  const videos = currentListing.videos.filter(v => match(v.name));
-  const audios = (currentListing.audios || []).filter(a => match(a.name));
+  const dirs = currentListing.dirs;
+  const videos = currentListing.videos;
+  const audios = currentListing.audios || [];
 
   if (dirs.length === 0 && videos.length === 0 && audios.length === 0) {
-    showEmpty(kw ? `没有匹配“${searchKeyword}”的结果` : "这个目录还没有音视频文件");
+    showEmpty("这个目录还没有音视频文件");
     $("#list-meta").textContent = "0 个文件夹 · 0 个视频 · 0 个音频";
     return;
   }
@@ -243,10 +242,72 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* ---------------- 全库搜索 ---------------- */
+
 $("#search-box").addEventListener("input", (e) => {
-  searchKeyword = e.target.value;
-  if (currentListing) renderGrid();
+  const kw = e.target.value.trim();
+  clearTimeout(runSearch._t);
+  runSearch._t = setTimeout(() => runSearch(kw), 250);
 });
+
+async function runSearch(kw) {
+  const seq = ++searchSeq;
+  if (!kw) {
+    if (searchActive) renderBrowse(currentPath);
+    return;
+  }
+  let data;
+  try {
+    const res = await fetch("/api/search?q=" + encodeURIComponent(kw));
+    data = await res.json();
+    if (data.error) throw new Error(data.error);
+  } catch {
+    return; /* 搜索失败保持现状 */
+  }
+  if (seq !== searchSeq) return;   // 已有更新的请求或已切页
+  searchActive = true;
+  renderSearchResults(data, kw);
+}
+
+function renderSearchResults(data, kw) {
+  const grid = $("#file-grid");
+  grid.innerHTML = "";
+  $("#empty-tip").classList.add("hidden");
+  durationObserver.disconnect();
+
+  const bc = $("#breadcrumb");
+  bc.innerHTML = "";
+  const cur = document.createElement("span");
+  cur.className = "current";
+  cur.textContent = `搜索“${kw}”`;
+  bc.appendChild(cur);
+
+  const results = data.results || [];
+  $("#list-meta").textContent =
+    `搜索“${kw}”：${results.length} 个结果` + (data.truncated ? "（仅显示前 200 条）" : "");
+  if (results.length === 0) {
+    showEmpty(`没有匹配“${kw}”的结果`);
+    return;
+  }
+
+  for (const r of results) {
+    const parent = r.path.split("/").slice(0, -1).join("/") || "根目录";
+    const isDir = r.type === "dir";
+    const isAudio = r.kind === "audio";
+    const pct = (!isDir && r.kind) ? progressPct(r.path) : 0;
+    const card = document.createElement("div");
+    card.className = "file-card" + (isDir ? " is-dir" : isAudio ? " is-audio" : "");
+    card.innerHTML = `
+      <div class="file-thumb">${isDir ? DIR_SVG : isAudio ? AUDIO_SVG : VIDEO_SVG}${isDir ? "" : `<span class="thumb-badge">${r.ext.toUpperCase()}</span>`}</div>
+      ${pct > 0 ? `<div class="progress-bar"><div style="width:${pct}%"></div></div>` : ""}
+      <div class="file-info">
+        <div class="file-name">${escapeHtml(r.name)}</div>
+        <div class="file-sub"><span>${isDir ? "文件夹" : formatSize(r.size || 0)}</span><span>${escapeHtml(parent)}</span></div>
+      </div>`;
+    card.onclick = () => navigate(isDir ? "#/" + encodePath(r.path) : "#/watch/" + encodePath(r.path));
+    grid.appendChild(card);
+  }
+}
 
 /* ---------------- 播放页 ---------------- */
 
@@ -255,6 +316,8 @@ const audioCover = $("#audio-cover");
 const videoError = $("#video-error");
 const resumeToast = $("#resume-toast");
 let currentWatchPath = "";
+let nextMediaPath = "";      // 同目录下一个媒体路径（连播用），空表示没有
+let subtitleUrls = [];       // 已创建的字幕 Blob URL，切换视频时释放
 let saveTimer = null;
 let resumeTimer = null;
 let resumeState = null;   // 恢复提示当前对应的进度 {path, p}
@@ -278,6 +341,10 @@ async function renderWatch(vPath) {
   hideResumeToast();
   pendingSeek = null;
   videoError.classList.add("hidden");
+  nextMediaPath = "";
+  $("#btn-next").classList.add("hidden");
+  subtitleUrls.forEach(u => URL.revokeObjectURL(u));
+  subtitleUrls = [];
 
   const name = vPath.split("/").pop();
   const isAudio = isAudioFile(name);
@@ -296,7 +363,33 @@ async function renderWatch(vPath) {
   video.playbackRate = Number($("#speed-select").value) || 1;
 
   restoreProgress(vPath);
+  await loadSiblingListing(vPath);
   if (!isAudio) await attachSubtitle(vPath);
+  nextMediaPath = findNextMedia(vPath, isAudio) || "";
+  $("#btn-next").classList.toggle("hidden", !nextMediaPath);
+}
+
+// 拉取同目录列表，供字幕匹配与连播使用
+async function loadSiblingListing(vPath) {
+  currentListing = null;
+  const dir = vPath.split("/").slice(0, -1).join("/");
+  try {
+    const res = await fetch("/api/list?path=" + encodeURIComponent(dir));
+    const data = await res.json();
+    if (!data.error) currentListing = data;
+  } catch { /* 列表拉取失败不影响播放 */ }
+}
+
+// 同目录中排在当前文件之后的下一个媒体（服务端已自然排序）
+function findNextMedia(vPath, isAudio) {
+  if (!currentListing) return null;
+  const name = vPath.split("/").pop();
+  const pool = isAudio ? (currentListing.audios || []) : (currentListing.videos || []);
+  const idx = pool.findIndex(x => x.name === name);
+  if (idx === -1 || idx + 1 >= pool.length) return null;
+  const dir = vPath.split("/").slice(0, -1).join("/");
+  const nextName = pool[idx + 1].name;
+  return dir ? dir + "/" + nextName : nextName;
 }
 
 // 音频封面上的均衡器动画随播放状态启停
@@ -348,37 +441,55 @@ function performSeek(st) {
   }
 }
 
+// 常见字幕语言后缀 → 显示名
+const SUB_LANGS = {
+  chs: "简体中文", sc: "简体中文", zhs: "简体中文", zh: "中文",
+  cht: "繁體中文", tc: "繁體中文", big5: "繁體中文",
+  eng: "English", en: "English",
+  jpn: "日本語", jp: "日本語", ja: "日本語",
+  kor: "한국어", kr: "한국어", ko: "한국어",
+};
+
 async function attachSubtitle(vPath) {
-  if (!currentListing) {
-    // 直接进入播放页时，先拉取同目录列表以获得字幕信息
-    const dir = vPath.split("/").slice(0, -1).join("/");
-    try {
-      const res = await fetch("/api/list?path=" + encodeURIComponent(dir));
-      currentListing = await res.json();
-      if (currentListing.error) currentListing = null;
-    } catch { return; }
+  if (!currentListing || !currentListing.subs || !currentListing.subs.length) return;
+  const name = vPath.split("/").pop();
+  const base = name.replace(/\.[^.]+$/, "").toLowerCase();
+  // 第一优先：同名或同名.语言后缀（Movie.srt / Movie.chs.srt）
+  let matches = currentListing.subs.filter(s => {
+    const sb = s.name.replace(/\.[^.]+$/, "").toLowerCase();
+    return sb === base || sb.startsWith(base + ".");
+  });
+  // 第二优先：视频名包含字幕名（"Movie [1080p].mp4" 配 "Movie.srt"）
+  if (!matches.length) {
+    matches = currentListing.subs.filter(s => {
+      const sb = s.name.replace(/\.[^.]+$/, "").toLowerCase();
+      return sb.length >= 3 && base.includes(sb);
+    });
   }
-  if (!currentListing || !currentListing.subs) return;
+  if (!matches.length) return;
 
-  const base = vPath.split("/").pop().replace(/\.[^.]+$/, "");
   const dir = vPath.split("/").slice(0, -1).join("/");
-  const sub = currentListing.subs.find(s => s.name.replace(/\.[^.]+$/, "") === base)
-    || currentListing.subs.find(s => s.name.toLowerCase().includes(base.toLowerCase()));
-  if (!sub) return;
-
-  const subPath = dir ? dir + "/" + sub.name : sub.name;
-  try {
-    const res = await fetch("/api/file?path=" + encodeURIComponent(subPath));
-    let text = await res.text();
-    if (/\.srt$/i.test(sub.name)) text = srtToVtt(text);
-    const url = URL.createObjectURL(new Blob([text], { type: "text/vtt" }));
-    const track = document.createElement("track");
-    track.kind = "subtitles";
-    track.label = "字幕";
-    track.src = url;
-    track.default = true;
-    video.appendChild(track);
-  } catch { /* 字幕加载失败不影响播放 */ }
+  for (let i = 0; i < matches.length; i++) {
+    const sub = matches[i];
+    const subPath = dir ? dir + "/" + sub.name : sub.name;
+    try {
+      const res = await fetch("/api/file?path=" + encodeURIComponent(subPath));
+      let text = await res.text();
+      if (/\.srt$/i.test(sub.name)) text = srtToVtt(text);
+      const url = URL.createObjectURL(new Blob([text], { type: "text/vtt" }));
+      subtitleUrls.push(url);
+      const track = document.createElement("track");
+      track.kind = "subtitles";
+      const suffix = sub.name.replace(/\.[^.]+$/, "").slice(base.length).replace(/^\./, "").toLowerCase();
+      track.label = SUB_LANGS[suffix] || (suffix ? "字幕 " + suffix : "字幕");
+      if (/^(chs|sc|zhs|zh)$/.test(suffix)) track.srclang = "zh-CN";
+      else if (/^(cht|tc|big5)$/.test(suffix)) track.srclang = "zh-TW";
+      else if (/^(eng|en)$/.test(suffix)) track.srclang = "en";
+      if (i === 0) track.default = true;
+      track.src = url;
+      video.appendChild(track);
+    } catch { /* 字幕加载失败不影响播放 */ }
+  }
 }
 
 function srtToVtt(srt) {
@@ -419,6 +530,10 @@ video.addEventListener("ended", () => {
   if (currentWatchPath && isFinite(video.duration) && video.duration > 0) {
     writeProgress(currentWatchPath, video.duration, video.duration);
   }
+  // 自动连播：播完接同目录下一个
+  if (nextMediaPath && localStorage.getItem("vp-autonext") !== "0") {
+    navigate("#/watch/" + encodePath(nextMediaPath));
+  }
 });
 window.addEventListener("pagehide", flushProgress);
 document.addEventListener("visibilitychange", () => {
@@ -443,14 +558,46 @@ document.addEventListener("keydown", (e) => {
       if (document.fullscreenElement) document.exitFullscreen();
       else video.requestFullscreen().catch(() => {});
       break;
+    case "n": case "N":
+      if (nextMediaPath) navigate("#/watch/" + encodePath(nextMediaPath));
+      break;
     case "Escape":
       if (!document.fullscreenElement) goBackToBrowse();
       break;
   }
 });
 
-$("#speed-select").addEventListener("change", (e) => {
+// 记住倍速、音量、静音
+const speedSelect = $("#speed-select");
+(() => {
+  const savedSpeed = Number(localStorage.getItem("vp-speed"));
+  if ([...speedSelect.options].some(o => Number(o.value) === savedSpeed)) {
+    speedSelect.value = String(savedSpeed);
+  }
+  const savedVolume = Number(localStorage.getItem("vp-volume"));
+  if (isFinite(savedVolume)) video.volume = Math.min(1, Math.max(0, savedVolume));
+  video.muted = localStorage.getItem("vp-muted") === "1";
+})();
+speedSelect.addEventListener("change", (e) => {
   video.playbackRate = Number(e.target.value);
+  localStorage.setItem("vp-speed", e.target.value);
+});
+video.addEventListener("volumechange", () => {
+  localStorage.setItem("vp-volume", String(video.volume));
+  localStorage.setItem("vp-muted", video.muted ? "1" : "0");
+});
+
+// 连播开关与"下一集"按钮
+function updateAutonextBtn() {
+  $("#btn-autonext").textContent = localStorage.getItem("vp-autonext") === "0" ? "连播 关" : "连播 开";
+}
+$("#btn-autonext").addEventListener("click", () => {
+  localStorage.setItem("vp-autonext", localStorage.getItem("vp-autonext") === "0" ? "1" : "0");
+  updateAutonextBtn();
+});
+updateAutonextBtn();
+$("#btn-next").addEventListener("click", () => {
+  if (nextMediaPath) navigate("#/watch/" + encodePath(nextMediaPath));
 });
 
 function goBackToBrowse() {

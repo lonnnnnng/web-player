@@ -130,6 +130,10 @@ body {
   flex: 1; font-size: 15px; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.player-actions {
+  display: flex; align-items: center; gap: 8px;
+  flex: none;
+}
 .speed-select {
   background: var(--bg-card); color: var(--text);
   border: 1px solid #2c3247; border-radius: 8px;
