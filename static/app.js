@@ -845,6 +845,9 @@ document.addEventListener("keydown", (e) => {
     case "ArrowRight": video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); break;
     case "ArrowUp": video.volume = Math.min(1, video.volume + 0.1); break;
     case "ArrowDown": video.volume = Math.max(0, video.volume - 0.1); break;
+    case "m": case "M":
+      video.muted = !video.muted;
+      break;
     case "f": case "F":
       if (document.fullscreenElement) document.exitFullscreen();
       else video.requestFullscreen().catch(() => {});
@@ -873,10 +876,43 @@ speedSelect.addEventListener("change", (e) => {
   video.playbackRate = Number(e.target.value);
   localStorage.setItem("vp-speed", e.target.value);
 });
+
+// 静音偏好只在用户主动操作时记录：
+// 移动端浏览器的自动播放策略常会"强制静音起播"，若无条件记录，
+// 策略性静音会被当成用户偏好永久保存，导致手机上一直是静音
+let inUserGesture = false;
+function markGesture() {
+  inUserGesture = true;
+  setTimeout(() => { inUserGesture = false; }, 1000);
+}
+document.addEventListener("pointerdown", markGesture, true);
+document.addEventListener("keydown", markGesture, true);
+
 video.addEventListener("volumechange", () => {
   localStorage.setItem("vp-volume", String(video.volume));
-  localStorage.setItem("vp-muted", video.muted ? "1" : "0");
+  if (inUserGesture) localStorage.setItem("vp-muted", video.muted ? "1" : "0");
+  updateMuteBtn();
 });
+
+// 自定义静音按钮：iOS 等移动端原生控制条没有静音键，这里提供统一入口
+const btnMute = $("#btn-mute");
+function updateMuteBtn() {
+  btnMute.textContent = (video.muted || video.volume === 0) ? "声音 关" : "声音 开";
+}
+btnMute.addEventListener("click", () => {
+  video.muted = !video.muted;
+  if (!video.muted && video.volume === 0) {
+    try { video.volume = 1; } catch { /* iOS 上 volume 只读，忽略 */ }
+  }
+});
+updateMuteBtn();
+
+// 若被自动播放策略静音、但用户偏好有声，则在播放开始/首次触屏时自动恢复声音
+function tryRestoreSound() {
+  if (video.muted && localStorage.getItem("vp-muted") !== "1") video.muted = false;
+}
+video.addEventListener("play", tryRestoreSound);
+document.addEventListener("touchend", tryRestoreSound, { passive: true });
 
 // 连播开关与"下一集"按钮
 function updateAutonextBtn() {
