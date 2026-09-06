@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import socketserver
 import subprocess
 import sys
 import urllib.parse
@@ -302,6 +303,17 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
 
+class VideoHTTPServer(ThreadingHTTPServer):
+    # 跳过 getfqdn 反向解析：http.server 默认 server_bind 会对监听地址做
+    # socket.getfqdn()，主机名含非 ASCII 字符（如中文电脑名）时抛
+    # UnicodeEncodeError，服务无法启动。server_name 本项目未使用，直接取绑定地址。
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+
 def load_config_file():
     """读取 config.json（可选）。"""
     cfg_path = os.path.join(BASE_DIR, "config.json")
@@ -450,7 +462,7 @@ def main():
         print("错误: 缺少 static 目录: %s" % STATIC_DIR)
         sys.exit(1)
 
-    server = ThreadingHTTPServer((host, port), VideoRequestHandler)
+    server = VideoHTTPServer((host, port), VideoRequestHandler)
     lan_ip = get_local_ip()
     print("=" * 56)
     print("  本地音视频播放器已启动")
