@@ -36,6 +36,9 @@ const AUDIO_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 18.5
 // 与服务端 AUDIO_EXTS 保持一致
 const AUDIO_EXTS_JS = ["mp3", "m4a", "aac", "flac", "wav", "ogg", "opus"];
 
+// 浏览器普遍无法直接解码的视频格式（列表页打"不支持"角标，点击仍可尝试）
+const UNPLAYABLE_EXTS = ["avi", "flv", "wmv", "mpg", "mpeg", "ts", "mts", "m2ts", "3gp"];
+
 function isAudioFile(name) {
   const ext = name.split(".").pop().toLowerCase();
   return AUDIO_EXTS_JS.includes(ext);
@@ -55,7 +58,7 @@ function parseRoute() {
   return { page: "browse", path: h === "/" ? "" : h.slice(1) };
 }
 
-window.addEventListener("hashchange", render);
+// hashchange 监听在"浏览页"区（离开目录时需先记录滚动位置）
 
 /* ---------------- 浏览页 ---------------- */
 
@@ -82,30 +85,80 @@ const durationObserver = new IntersectionObserver((entries) => {
   }
 }, { rootMargin: "120px" });
 
+const listingCache = new Map();    // path -> {data, json}，返回目录时秒开
+const scrollPositions = new Map(); // path -> 滚动位置
+let lastBrowsePath = null;         // 离开浏览页时用于记录滚动位置
+let browseSeq = 0;                 // 目录请求序号，丢弃过期响应
+
+window.addEventListener("hashchange", () => {
+  // 离开当前目录时记住滚动位置（此时浏览页尚未切换）
+  if (!browsePage.classList.contains("hidden") && lastBrowsePath !== null) {
+    scrollPositions.set(lastBrowsePath, window.scrollY);
+  }
+  render();
+});
+
 async function renderBrowse(relPath) {
   currentPath = relPath;
+  lastBrowsePath = relPath;
   searchActive = false;
   searchSeq++;               // 作废在途搜索响应
   $("#search-box").value = "";
+  const seq = ++browseSeq;
 
+  const cached = listingCache.get(relPath);
+  if (cached) {
+    applyListing(cached.data, relPath);
+    refreshListing(relPath, seq);   // 后台刷新，数据有变才重绘
+    return;
+  }
+  await fetchAndApplyListing(relPath, seq);
+}
+
+async function fetchAndApplyListing(relPath, seq) {
   let data;
   try {
     const res = await fetch("/api/list?path=" + encodeURIComponent(relPath));
     data = await res.json();
     if (data.error) throw new Error(data.error);
   } catch (e) {
-    $("#file-grid").innerHTML = "";
-    showEmpty("加载失败：" + e.message);
+    if (seq === browseSeq) {
+      $("#file-grid").innerHTML = "";
+      showEmpty("加载失败：" + e.message);
+    }
     return;
   }
+  if (seq !== browseSeq) return;
+  applyListing(data, relPath, true);
+}
+
+// 后台重新拉取目录，内容有变化时才重绘（避免多余的时间探测）
+async function refreshListing(relPath, seq) {
+  try {
+    const res = await fetch("/api/list?path=" + encodeURIComponent(relPath));
+    const data = await res.json();
+    if (data.error || seq !== browseSeq) return;
+    const json = JSON.stringify(data);
+    const cached = listingCache.get(relPath);
+    if (cached && json === cached.json) return;
+    listingCache.set(relPath, { data, json });
+    if (currentPath === relPath && !searchActive) applyListing(data, relPath);
+  } catch { /* 刷新失败保留缓存 */ }
+}
+
+function applyListing(data, relPath, cacheIt) {
   currentListing = data;
+  const json = JSON.stringify(data);
+  const cached = listingCache.get(relPath);
+  if (cacheIt || !cached) listingCache.set(relPath, { data, json });
+  else cached.data = data, cached.json = json;
 
   renderBreadcrumb(relPath);
-  const total = data.dirs.length + data.videos.length + (data.audios || []).length;
   $("#list-meta").textContent =
-    `${data.dirs.length} 个文件夹 · ${data.videos.length} 个视频 · ${(data.audios || []).length} 个音频` + (total === 0 ? "" : "");
-
+    `${data.dirs.length} 个文件夹 · ${data.videos.length} 个视频 · ${(data.audios || []).length} 个音频`;
   renderGrid();
+  renderResumeRow();
+  requestAnimationFrame(() => window.scrollTo(0, scrollPositions.get(relPath) || 0));
 }
 
 function renderBreadcrumb(relPath) {
@@ -155,9 +208,37 @@ function readProgress(path) {
   return null;
 }
 
+let pushTimer = null;
+const dirtyProgress = new Map();   // 待同步到服务端的进度（path -> 记录）
+
 function writeProgress(path, t, d) {
   if (!isFinite(t) || !isFinite(d) || d <= 0) return;
-  localStorage.setItem(progressKey(path), JSON.stringify({ t: Math.round(t * 10) / 10, d: Math.round(d * 10) / 10 }));
+  const rec = { t: Math.round(t * 10) / 10, d: Math.round(d * 10) / 10, ts: Math.floor(Date.now() / 1000) };
+  localStorage.setItem(progressKey(path), JSON.stringify(rec));
+  dirtyProgress.set(path, rec);
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushProgressToServer, 3000);
+}
+
+// 清除进度：本地 + 服务端（"从头看"）
+function removeProgress(path) {
+  localStorage.removeItem(progressKey(path));
+  dirtyProgress.set(path, { t: 0, d: 0, ts: Math.floor(Date.now() / 1000) });
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushProgressToServer, 1000);
+}
+
+// 用 sendBeacon 把待同步进度发给服务端（跨设备续看）
+function pushProgressToServer() {
+  if (!dirtyProgress.size) return;
+  const items = [...dirtyProgress.entries()].map(([path, r]) => Object.assign({ path }, r));
+  dirtyProgress.clear();
+  const payload = JSON.stringify({ items });
+  try {
+    navigator.sendBeacon("/api/progress", new Blob([payload], { type: "application/json" }));
+  } catch {
+    fetch("/api/progress", { method: "POST", body: payload, keepalive: true }).catch(() => {});
+  }
 }
 
 function progressPct(path) {
@@ -198,10 +279,11 @@ function renderGrid() {
   for (const v of videos) {
     const vPath = currentPath ? currentPath + "/" + v.name : v.name;
     const pct = progressPct(vPath);
+    const unplayable = UNPLAYABLE_EXTS.includes(v.ext.toLowerCase());
     const card = document.createElement("div");
-    card.className = "file-card";
+    card.className = "file-card" + (unplayable ? " is-unsupported" : "");
     card.innerHTML = `
-      <div class="file-thumb">${VIDEO_SVG}<span class="thumb-badge">${v.ext.toUpperCase()}</span></div>
+      <div class="file-thumb">${VIDEO_SVG}<span class="thumb-badge">${v.ext.toUpperCase()}</span>${unplayable ? '<span class="thumb-flag">不支持</span>' : ""}</div>
       ${pct > 0 ? `<div class="progress-bar"><div style="width:${pct}%"></div></div>` : ""}
       <div class="file-info">
         <div class="file-name">${escapeHtml(v.name)}</div>
@@ -240,6 +322,75 @@ function renderGrid() {
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ---------------- 继续观看（仅根目录顶部显示） ---------------- */
+
+function renderResumeRow() {
+  const sec = $("#resume-row");
+  if (!sec) return;
+  const wrap = $("#resume-cards");
+  wrap.innerHTML = "";
+  const items = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !k.startsWith("vp-progress:")) continue;
+    const path = k.slice("vp-progress:".length);
+    const p = readProgress(path);
+    if (!p || p.frac <= 0.02 || p.frac >= 0.97) continue;
+    let ts = 0;
+    try { ts = Number(JSON.parse(localStorage.getItem(k)).ts) || 0; } catch { /* 忽略 */ }
+    items.push({ path, frac: p.frac, ts });
+  }
+  if (currentPath !== "" || searchActive || items.length === 0) {
+    sec.classList.add("hidden");
+    return;
+  }
+  items.sort((a, b) => b.ts - a.ts);
+  for (const it of items.slice(0, 8)) {
+    const name = it.path.split("/").pop();
+    const isAudio = isAudioFile(name);
+    const pct = Math.min(100, Math.round(it.frac * 100));
+    const card = document.createElement("div");
+    card.className = "file-card" + (isAudio ? " is-audio" : "");
+    card.innerHTML = `
+      <div class="file-thumb">${isAudio ? AUDIO_SVG : VIDEO_SVG}</div>
+      <div class="file-info">
+        <div class="file-name">${escapeHtml(name)}</div>
+        <div class="file-sub"><span>已看 ${pct}%</span></div>
+      </div>
+      <div class="progress-bar"><div style="width:${pct}%"></div></div>`;
+    card.onclick = () => navigate("#/watch/" + encodePath(it.path));
+    wrap.appendChild(card);
+  }
+  sec.classList.remove("hidden");
+}
+
+// 启动时拉取服务端进度合并到本地（跨设备续看；本地较新的记录优先）
+async function syncProgressFromServer() {
+  let items;
+  try {
+    const res = await fetch("/api/progress");
+    items = (await res.json()).items || {};
+  } catch {
+    return; /* 服务端不可达时纯本地模式 */
+  }
+  let changed = false;
+  for (const [path, it] of Object.entries(items)) {
+    if (!it || !isFinite(it.t) || !isFinite(it.d) || !(it.d > 0)) continue;
+    const key = progressKey(path);
+    let localTs = 0;
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      try { localTs = Number(JSON.parse(raw).ts) || 0; } catch { localTs = 0; }
+    }
+    const serverTs = Number(it.ts) || 0;
+    if (serverTs >= localTs) {
+      localStorage.setItem(key, JSON.stringify({ t: it.t, d: it.d, ts: serverTs }));
+      changed = true;
+    }
+  }
+  if (changed) renderResumeRow();
 }
 
 /* ---------------- 全库搜索 ---------------- */
@@ -282,6 +433,8 @@ function renderSearchResults(data, kw) {
   cur.textContent = `搜索“${kw}”`;
   bc.appendChild(cur);
 
+  $("#resume-row").classList.add("hidden");
+
   const results = data.results || [];
   $("#list-meta").textContent =
     `搜索“${kw}”：${results.length} 个结果` + (data.truncated ? "（仅显示前 200 条）" : "");
@@ -294,11 +447,12 @@ function renderSearchResults(data, kw) {
     const parent = r.path.split("/").slice(0, -1).join("/") || "根目录";
     const isDir = r.type === "dir";
     const isAudio = r.kind === "audio";
+    const unplayable = !isDir && !isAudio && UNPLAYABLE_EXTS.includes(r.ext.toLowerCase());
     const pct = (!isDir && r.kind) ? progressPct(r.path) : 0;
     const card = document.createElement("div");
-    card.className = "file-card" + (isDir ? " is-dir" : isAudio ? " is-audio" : "");
+    card.className = "file-card" + (isDir ? " is-dir" : isAudio ? " is-audio" : unplayable ? " is-unsupported" : "");
     card.innerHTML = `
-      <div class="file-thumb">${isDir ? DIR_SVG : isAudio ? AUDIO_SVG : VIDEO_SVG}${isDir ? "" : `<span class="thumb-badge">${r.ext.toUpperCase()}</span>`}</div>
+      <div class="file-thumb">${isDir ? DIR_SVG : isAudio ? AUDIO_SVG : VIDEO_SVG}${isDir ? "" : `<span class="thumb-badge">${r.ext.toUpperCase()}</span>`}${unplayable ? '<span class="thumb-flag">不支持</span>' : ""}</div>
       ${pct > 0 ? `<div class="progress-bar"><div style="width:${pct}%"></div></div>` : ""}
       <div class="file-info">
         <div class="file-name">${escapeHtml(r.name)}</div>
@@ -432,7 +586,7 @@ function performSeek(st) {
   const p = st.p;
   if (p.t !== undefined) {
     if (Math.abs(video.duration - p.d) / p.d > 0.05) {
-      localStorage.removeItem(progressKey(st.path));
+      removeProgress(st.path);
       return;
     }
     video.currentTime = Math.min(p.t, Math.max(0, video.duration - 1));
@@ -513,7 +667,7 @@ function restoreProgress(vPath) {
     else pendingSeek = st;
   };
   $("#resume-no").onclick = () => {
-    localStorage.removeItem(progressKey(vPath));
+    removeProgress(vPath);
     hideResumeToast();
   };
   resumeTimer = setTimeout(hideResumeToast, 10000);
@@ -535,9 +689,9 @@ video.addEventListener("ended", () => {
     navigate("#/watch/" + encodePath(nextMediaPath));
   }
 });
-window.addEventListener("pagehide", flushProgress);
+window.addEventListener("pagehide", () => { flushProgress(); pushProgressToServer(); });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") flushProgress();
+  if (document.visibilityState === "hidden") { flushProgress(); pushProgressToServer(); }
 });
 
 /* ---------------- 播放页快捷键 ---------------- */
@@ -631,3 +785,4 @@ function render() {
 }
 
 render();
+syncProgressFromServer();   // 拉取服务端进度，合并后刷新"继续观看"

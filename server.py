@@ -23,6 +23,8 @@ import socket
 import socketserver
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -63,6 +65,29 @@ CONFIG = {
     "video_dir": os.path.join(BASE_DIR, "videos"),
     "password": "",
 }
+
+# 播放进度落盘文件（跨设备同步），并发写入用锁串行化
+PROGRESS_PATH = os.path.join(BASE_DIR, "player-progress.json")
+PROGRESS_LOCK = threading.Lock()
+
+
+def _load_progress_store():
+    try:
+        with open(PROGRESS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_progress_store(store):
+    tmp = PROGRESS_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False)
+        os.replace(tmp, PROGRESS_PATH)
+    except OSError:
+        pass
 
 
 def natural_key(s):
@@ -148,6 +173,8 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.api_list(query)
         elif path == "/api/search":
             self.api_search(query)
+        elif path == "/api/progress":
+            self.api_progress_get()
         elif path == "/api/file":
             self.api_file(query, head_only=False)
         else:
@@ -163,6 +190,15 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
+
+    def do_POST(self):
+        if not self.check_auth():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/progress":
+            self.api_progress_post()
+        else:
+            self.send_error_json(404, "not found")
 
     # ---------- 静态文件 ----------
 
@@ -280,6 +316,46 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
                 results = results[:limit]
                 break
         self.send_json({"results": results, "truncated": truncated})
+
+    # ---------- API: 播放进度（跨设备同步） ----------
+
+    def api_progress_get(self):
+        with PROGRESS_LOCK:
+            store = _load_progress_store()
+        self.send_json({"items": store})
+
+    def api_progress_post(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length < 1_000_000:
+                raise ValueError
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            items = body.get("items") if isinstance(body, dict) else body
+            if not isinstance(items, list):
+                raise ValueError
+        except (ValueError, json.JSONDecodeError, OSError):
+            self.send_error_json(400, "bad request")
+            return
+
+        def valid_num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e15
+
+        with PROGRESS_LOCK:
+            store = _load_progress_store()
+            for it in items:
+                if not isinstance(it, dict) or not isinstance(it.get("path"), str) or not it["path"]:
+                    continue
+                t, d, ts = it.get("t"), it.get("d"), it.get("ts")
+                if not (valid_num(t) and valid_num(d) and valid_num(ts)):
+                    continue
+                t, d, ts = float(t), float(d), float(ts)
+                if d <= 0 or t < 0:
+                    # t<0 / d<=0 表示清除该条进度（"从头看"）
+                    store.pop(it["path"], None)
+                    continue
+                store[it["path"]] = {"t": round(t, 1), "d": round(d, 1), "ts": int(ts) or int(time.time())}
+            _save_progress_store(store)
+        self.send_json({"ok": True})
 
     # ---------- API: 文件流（支持 Range） ----------
 

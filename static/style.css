@@ -112,6 +112,25 @@ body {
 .empty-tip { text-align: center; padding: 80px 0; color: var(--text-dim); }
 .empty-icon { font-size: 52px; margin-bottom: 14px; }
 
+/* ===== 继续观看 ===== */
+.resume-section { margin-bottom: 18px; }
+.resume-title { font-size: 15px; font-weight: 600; margin: 4px 0 10px; }
+.resume-cards {
+  display: grid; grid-auto-flow: column;
+  grid-auto-columns: 190px;
+  gap: 12px; overflow-x: auto; padding-bottom: 6px;
+}
+.resume-cards .file-name { -webkit-line-clamp: 1; min-height: auto; }
+.resume-cards .file-thumb svg { width: 36px; height: 36px; }
+
+/* ===== 不支持格式角标 ===== */
+.thumb-flag {
+  position: absolute; left: 8px; top: 8px;
+  background: rgba(0,0,0,.72); color: #ffa06e;
+  font-size: 11px; padding: 2px 7px; border-radius: 5px;
+}
+.file-card.is-unsupported .file-thumb svg { filter: grayscale(1); opacity: .5; }
+
 /* ===== 播放页 ===== */
 .player-topbar {
   display: flex; align-items: center; gap: 16px;

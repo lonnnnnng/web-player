@@ -5,6 +5,7 @@ __pycache__/
 # 运行时产物
 player.log
 player.pid
+player-progress.json
 
 # 系统文件
 .DS_Store
