@@ -4,6 +4,7 @@
 const $ = (sel) => document.querySelector(sel);
 const browsePage = $("#browse-page");
 const playerPage = $("#player-page");
+const { srtToVtt } = window.PlayerUtils;
 
 /* ---------------- 工具函数 ---------------- */
 
@@ -25,6 +26,19 @@ function formatDuration(sec) {
 function encodePath(p) {
   // 按路径段编码，保留 /
   return p.split("/").map(encodeURIComponent).join("/");
+}
+
+function makeCardInteractive(card, handler) {
+  // long: 文件卡片原本只有鼠标 click，补上键盘语义后，移动端键盘和无障碍阅读器也能打开资源。
+  card.setAttribute("role", "button");
+  card.tabIndex = 0;
+  card.addEventListener("click", handler);
+  card.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handler();
+    }
+  });
 }
 
 const DIR_SVG = '<svg viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" fill="#4a7bd4"/><path d="M3 10h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-8z" fill="#5a8de0"/></svg>';
@@ -50,7 +64,13 @@ function navigate(hash) { location.hash = hash; }
 
 function parseRoute() {
   // #/  -> 浏览根目录; #/子/目录 -> 浏览; #/watch/路径 -> 播放
-  let h = decodeURIComponent(location.hash.replace(/^#/, "")) || "/";
+  let h;
+  try {
+    h = decodeURIComponent(location.hash.replace(/^#/, "")) || "/";
+  } catch {
+    // long: 手工粘贴或外部链接里的损坏百分号不能让整个单页应用停止渲染，回到安全根目录。
+    h = "/";
+  }
   h = h.replace(/\/+$/, "") || "/";
   if (h.startsWith("/watch/")) {
     return { page: "watch", path: h.slice("/watch/".length) };
@@ -363,7 +383,7 @@ function renderGrid() {
         <div class="file-name">${escapeHtml(d.name)}</div>
         <div class="file-sub"><span>文件夹</span></div>
       </div>`;
-    card.onclick = () => navigate("#/" + encodePath(currentPath ? currentPath + "/" + d.name : d.name));
+    makeCardInteractive(card, () => navigate("#/" + encodePath(currentPath ? currentPath + "/" + d.name : d.name)));
     grid.appendChild(card);
   }
 
@@ -380,7 +400,7 @@ function renderGrid() {
         <div class="file-name">${escapeHtml(v.name)}</div>
         <div class="file-sub"><span>${formatSize(v.size)}</span><span>${new Date(v.mtime * 1000).toLocaleDateString()}</span></div>
       </div>`;
-    card.onclick = () => navigate("#/watch/" + encodePath(vPath));
+    makeCardInteractive(card, () => navigate("#/watch/" + encodePath(vPath)));
     const thumb = card.querySelector(".file-thumb");
     thumb.dataset.path = vPath;
     thumb.dataset.mtime = v.mtime;
@@ -406,7 +426,7 @@ function renderGrid() {
         <div class="file-name">${escapeHtml(a.name)}</div>
         <div class="file-sub"><span>${formatSize(a.size)}</span><span>${new Date(a.mtime * 1000).toLocaleDateString()}</span></div>
       </div>`;
-    card.onclick = () => navigate("#/watch/" + encodePath(aPath));
+    makeCardInteractive(card, () => navigate("#/watch/" + encodePath(aPath)));
     const thumb = card.querySelector(".file-thumb");
     thumb.dataset.path = aPath;
     thumb.dataset.mtime = a.mtime;
@@ -463,7 +483,7 @@ function renderResumeRow() {
         <div class="file-sub"><span>已看 ${pct}%</span></div>
       </div>
       <div class="progress-bar"><div style="width:${pct}%"></div></div>`;
-    card.onclick = () => navigate("#/watch/" + encodePath(it.path));
+    makeCardInteractive(card, () => navigate("#/watch/" + encodePath(it.path)));
     wrap.appendChild(card);
   }
   sec.classList.remove("hidden");
@@ -561,7 +581,7 @@ function renderSearchResults(data, kw) {
         <div class="file-name">${escapeHtml(r.name)}</div>
         <div class="file-sub"><span>${isDir ? "文件夹" : formatSize(r.size || 0)}</span><span>${escapeHtml(parent)}</span></div>
       </div>`;
-    card.onclick = () => navigate(isDir ? "#/" + encodePath(r.path) : "#/watch/" + encodePath(r.path));
+    makeCardInteractive(card, () => navigate(isDir ? "#/" + encodePath(r.path) : "#/watch/" + encodePath(r.path)));
     grid.appendChild(card);
   }
 }
@@ -579,6 +599,11 @@ let saveTimer = null;
 let resumeTimer = null;
 let resumeState = null;   // 恢复提示当前对应的进度 {path, p}
 let pendingSeek = null;   // 已点"继续播放"但元数据未就绪，等 loadedmetadata 后跳转
+let watchRequestSeq = 0;  // 播放页异步请求代次，快速换集时丢弃旧结果
+
+function isCurrentWatch(requestSeq, vPath) {
+  return requestSeq === watchRequestSeq && currentWatchPath === vPath;
+}
 
 function hideResumeToast() {
   clearTimeout(resumeTimer);
@@ -595,6 +620,7 @@ function flushProgress() {
 }
 
 async function renderWatch(vPath) {
+  const requestSeq = ++watchRequestSeq;
   hideResumeToast();
   pendingSeek = null;
   videoError.classList.add("hidden");
@@ -608,6 +634,7 @@ async function renderWatch(vPath) {
   $("#player-title").textContent = name;
   audioCover.classList.toggle("hidden", !isAudio);
   video.classList.toggle("is-audio", isAudio);
+  video.dataset.watchPath = vPath;
   $("#audio-title").textContent = name;
   audioCover.classList.remove("playing");
 
@@ -620,8 +647,12 @@ async function renderWatch(vPath) {
   video.playbackRate = Number($("#speed-select").value) || 1;
 
   restoreProgress(vPath);
-  await loadSiblingListing(vPath);
-  if (!isAudio) await attachSubtitle(vPath);
+  const listing = await loadSiblingListing(vPath);
+  // long: 视频 A 的目录/字幕请求可能晚于视频 B 返回；只有当前代次才能修改全局列表、字幕和连播状态。
+  if (!isCurrentWatch(requestSeq, vPath)) return;
+  currentListing = listing;
+  if (!isAudio) await attachSubtitle(vPath, listing, requestSeq);
+  if (!isCurrentWatch(requestSeq, vPath)) return;
   nextMediaPath = findNextMedia(vPath, isAudio) || "";
   $("#btn-next").classList.toggle("hidden", !nextMediaPath);
   updateMediaSession(vPath);
@@ -629,13 +660,15 @@ async function renderWatch(vPath) {
 
 // 拉取同目录列表，供字幕匹配与连播使用
 async function loadSiblingListing(vPath) {
-  currentListing = null;
   const dir = vPath.split("/").slice(0, -1).join("/");
   try {
     const res = await fetch("/api/list?path=" + encodeURIComponent(dir));
+    if (!res.ok) return null;
     const data = await res.json();
-    if (!data.error) currentListing = data;
-  } catch { /* 列表拉取失败不影响播放 */ }
+    return data.error ? null : data;
+  } catch {
+    return null; // 列表拉取失败不影响播放
+  }
 }
 
 // 同目录中排在当前文件之前/之后的媒体（服务端已自然排序）
@@ -690,7 +723,7 @@ video.addEventListener("ended", () => audioCover.classList.remove("playing"));
 
 // 解码失败（浏览器不支持的容器/编码）给出明确提示
 video.addEventListener("error", () => {
-  if (!currentWatchPath || !video.error) return;
+  if (!currentWatchPath || video.dataset.watchPath !== currentWatchPath || !video.error) return;
   hideResumeToast();
   pendingSeek = null;
   const name = currentWatchPath.split("/").pop();
@@ -741,18 +774,18 @@ const SUB_LANGS = {
   kor: "한국어", kr: "한국어", ko: "한국어",
 };
 
-async function attachSubtitle(vPath) {
-  if (!currentListing || !currentListing.subs || !currentListing.subs.length) return;
+async function attachSubtitle(vPath, listing, requestSeq) {
+  if (!listing || !listing.subs || !listing.subs.length) return;
   const name = vPath.split("/").pop();
   const base = name.replace(/\.[^.]+$/, "").toLowerCase();
   // 第一优先：同名或同名.语言后缀（Movie.srt / Movie.chs.srt）
-  let matches = currentListing.subs.filter(s => {
+  let matches = listing.subs.filter(s => {
     const sb = s.name.replace(/\.[^.]+$/, "").toLowerCase();
     return sb === base || sb.startsWith(base + ".");
   });
   // 第二优先：视频名包含字幕名（"Movie [1080p].mp4" 配 "Movie.srt"）
   if (!matches.length) {
-    matches = currentListing.subs.filter(s => {
+    matches = listing.subs.filter(s => {
       const sb = s.name.replace(/\.[^.]+$/, "").toLowerCase();
       return sb.length >= 3 && base.includes(sb);
     });
@@ -765,7 +798,9 @@ async function attachSubtitle(vPath) {
     const subPath = dir ? dir + "/" + sub.name : sub.name;
     try {
       const res = await fetch("/api/file?path=" + encodeURIComponent(subPath));
+      if (!res.ok || !isCurrentWatch(requestSeq, vPath)) return;
       let text = await res.text();
+      if (!isCurrentWatch(requestSeq, vPath)) return;
       if (/\.srt$/i.test(sub.name)) text = srtToVtt(text);
       const url = URL.createObjectURL(new Blob([text], { type: "text/vtt" }));
       subtitleUrls.push(url);
@@ -781,11 +816,6 @@ async function attachSubtitle(vPath) {
       video.appendChild(track);
     } catch { /* 字幕加载失败不影响播放 */ }
   }
-}
-
-function srtToVtt(srt) {
-  // SRT -> WebVTT（时间轴逗号改为点号）
-  return "WEBVTT\n\n" + srt.replace(/\r/g, "").replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
 }
 
 function restoreProgress(vPath) {
@@ -967,9 +997,11 @@ function render() {
     currentListing = null;
     renderWatch(route.path);
   } else {
+    watchRequestSeq++; // 作废尚未返回的目录和字幕请求，防止离开播放页后回写状态
     playerPage.classList.add("hidden");
     browsePage.classList.remove("hidden");
     video.pause();
+    delete video.dataset.watchPath;
     video.removeAttribute("src");
     video.load();
     currentWatchPath = "";

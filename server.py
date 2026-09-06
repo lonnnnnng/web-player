@@ -72,6 +72,60 @@ PROGRESS_PATH = os.path.join(BASE_DIR, "player-progress.json")
 PROGRESS_LOCK = threading.Lock()
 
 
+def normalize_relative_path(rel):
+    """规范化 URL 相对路径，统一分隔符并拒绝越界、空段和 NUL 字符。"""
+    if not isinstance(rel, str):
+        return None
+    rel = rel.replace("\\", "/").strip("/")
+    if rel in ("", "."):
+        return ""
+    parts = rel.split("/")
+    # long: 目录和进度键共用同一套路径规则，避免 Windows 反斜杠绕过越界检查，
+    # 也避免把重复分隔符或特殊段写入跨设备进度存储。
+    if any(not part or part in (".", "..") or "\x00" in part for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def parse_range_header(value, size):
+    """解析单段 bytes Range，返回 (start, end)；格式错误返回 None，越界返回 (-1, -1)。"""
+    if not value or size <= 0:
+        return None
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    if not match or not (match.group(1) or match.group(2)):
+        return None
+    try:
+        if match.group(1):
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else size - 1
+            end = min(end, size - 1)
+        else:
+            suffix_length = int(match.group(2))
+            if suffix_length <= 0:
+                return (-1, -1)
+            start = max(0, size - suffix_length)
+            end = size - 1
+    except (TypeError, ValueError, OverflowError):
+        return (-1, -1)
+    if start > end or start >= size:
+        return (-1, -1)
+    return start, end
+
+
+def resolve_under_root(root, rel):
+    """把相对路径解析到指定根目录；目标经符号链接解析后越界时返回 None。"""
+    normalized = normalize_relative_path(rel)
+    if normalized is None:
+        return None
+    root_real = os.path.realpath(root)
+    target = root_real if not normalized else os.path.realpath(
+        os.path.join(root_real, *normalized.split("/")))
+    try:
+        return target if os.path.commonpath((root_real, target)) == root_real else None
+    except ValueError:
+        return None
+
+
 def _load_progress_store():
     try:
         with open(PROGRESS_PATH, "r", encoding="utf-8") as f:
@@ -141,17 +195,7 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
 
     def resolve_under_root(self, rel):
         """把 URL 中的相对路径解析为根目录下的绝对路径，越界返回 None。"""
-        rel = (rel or "").strip().strip("/")
-        if rel in ("", "."):
-            return CONFIG["video_dir"]
-        parts = rel.split("/")
-        if any(p in ("", "..", ".") for p in parts):
-            return None
-        root_real = os.path.realpath(CONFIG["video_dir"])
-        target = os.path.realpath(os.path.join(root_real, *parts))
-        if target != root_real and not target.startswith(root_real + os.sep):
-            return None
-        return target
+        return resolve_under_root(CONFIG["video_dir"], rel)
 
     # ---------- 请求路由 ----------
 
@@ -217,8 +261,15 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
         ext = os.path.splitext(fp)[1].lower()
         st = os.stat(fp)
         etag = '"%d-%d"' % (st.st_size, int(st.st_mtime))
-        if self.headers.get("If-None-Match", "").strip() == etag:
+        last_modified = self.date_time_string(int(st.st_mtime))
+        if self.headers.get("If-None-Match", "").strip() == etag or \
+                (not self.headers.get("If-None-Match")
+                 and self.headers.get("If-Modified-Since", "").strip() == last_modified):
             self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_modified)
+            self.send_header("Cache-Control", "max-age=300")
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
         with open(fp, "rb") as f:
@@ -228,7 +279,7 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "max-age=300")
         self.send_header("ETag", etag)
-        self.send_header("Last-Modified", self.date_time_string(int(st.st_mtime)))
+        self.send_header("Last-Modified", last_modified)
         self.end_headers()
         self.wfile.write(data)
 
@@ -351,18 +402,29 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
 
         with PROGRESS_LOCK:
             store = _load_progress_store()
-            for it in items:
-                if not isinstance(it, dict) or not isinstance(it.get("path"), str) or not it["path"]:
+            for it in items[:1000]:
+                if not isinstance(it, dict) or not isinstance(it.get("path"), str):
+                    continue
+                path = normalize_relative_path(it["path"])
+                if not path:
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in VIDEO_EXTS and ext not in AUDIO_EXTS:
                     continue
                 t, d, ts = it.get("t"), it.get("d"), it.get("ts")
                 if not (valid_num(t) and valid_num(d) and valid_num(ts)):
                     continue
                 t, d, ts = float(t), float(d), float(ts)
                 if d <= 0 or t < 0:
-                    # t<0 / d<=0 表示清除该条进度（"从头看"）
-                    store.pop(it["path"], None)
+                    # long: 清除动作不依赖文件是否仍存在，媒体被移走后也能删掉跨设备旧进度。
+                    store.pop(path, None)
                     continue
-                store[it["path"]] = {"t": round(t, 1), "d": round(d, 1), "ts": int(ts) or int(time.time())}
+                # long: 新进度只属于当前资源目录中的真实媒体，避免任意键长期写入 JSON 文件。
+                if not os.path.isfile(self.resolve_under_root(path) or ""):
+                    continue
+                # long: 客户端异常或恶意提交的超长进度不能污染首页比例，统一限制在媒体总时长内。
+                store[path] = {"t": round(min(t, d), 1), "d": round(d, 1),
+                               "ts": int(ts) or int(time.time())}
             _save_progress_store(store)
         self.send_json({"ok": True})
 
@@ -404,20 +466,15 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
                 return
 
         if range_header:
-            m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
-            if m and (m.group(1) or m.group(2)):
-                if m.group(1):  # bytes=start-end
-                    start = int(m.group(1))
-                    if m.group(2):
-                        end = min(int(m.group(2)), size - 1)
-                else:           # bytes=-N （最后 N 字节）
-                    start = max(0, size - int(m.group(2)))
-                if start > end or start >= size:
-                    self.send_response(416)
-                    self.send_header("Content-Range", "bytes */%d" % size)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
+            parsed_range = parse_range_header(range_header, size)
+            if parsed_range == (-1, -1):
+                self.send_response(416)
+                self.send_header("Content-Range", "bytes */%d" % size)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if parsed_range:
+                start, end = parsed_range
                 status = 206
 
         length = end - start + 1
@@ -464,6 +521,14 @@ class VideoHTTPServer(ThreadingHTTPServer):
         host, port = self.server_address[:2]
         self.server_name = str(host)
         self.server_port = port
+
+    def handle_error(self, request, client_address):
+        # long: 手机端拖动进度或切换音频时会主动取消旧 Range 连接，
+        # 这属于正常生命周期，不应在服务日志中打印完整 traceback。
+        exc_type = sys.exc_info()[0]
+        if exc_type in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        super().handle_error(request, client_address)
 
 
 def load_config_file():

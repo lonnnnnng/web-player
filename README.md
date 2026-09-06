@@ -125,6 +125,18 @@ web-player/
 └── videos/          # 默认资源目录（未配置时使用）
 ```
 
+## 开发验证
+
+项目保持零第三方依赖，提交前可直接运行标准库测试和前端纯函数测试：
+
+```bash
+python3 -m unittest discover -s tests -v
+node --test tests/test_frontend_utils.js
+python3 -m py_compile server.py
+node --check static/utils.js
+node --check static/app.js
+```
+
 ## 安全说明
 
 - 服务端对路径做了严格校验，无法通过 `..` 等方式访问视频目录之外的文件

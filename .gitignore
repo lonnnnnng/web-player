@@ -14,3 +14,7 @@ Thumbs.db
 # 视频资源目录内容（保留目录本身，本地视频不入库）
 videos/*
 !videos/.gitkeep
+
+# 本地浏览器验收产物
+output/playwright/
+.playwright-cli/

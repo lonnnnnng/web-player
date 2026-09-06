@@ -80,6 +80,14 @@ body {
   box-shadow: 0 6px 20px rgba(0,0,0,.35);
   border-color: #333a55;
 }
+.file-card:focus-visible,
+.btn-back:focus-visible,
+.speed-select:focus-visible,
+#search-box:focus-visible,
+.resume-toast button:focus-visible {
+  outline: 2px solid #a79cff;
+  outline-offset: 2px;
+}
 .file-thumb {
   aspect-ratio: 16/9;
   background: linear-gradient(135deg, #232842 0%, #1a1e2e 100%);
@@ -262,4 +270,17 @@ body {
   .content { padding: 14px 14px 40px; }
   .file-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   .player-wrap { padding: 12px 10px 30px; }
+  .player-topbar { gap: 8px; padding: 9px 10px; flex-wrap: wrap; }
+  .player-title { order: 3; flex-basis: 100%; font-size: 14px; }
+  .player-actions { margin-left: auto; }
+  .player-actions .btn-back, .speed-select { padding: 7px 9px; font-size: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
 }

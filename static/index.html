@@ -18,7 +18,7 @@
       <svg class="logo" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" fill="#6c5ce7"/><path d="M10 9l6 3-6 3V9z" fill="#fff"/></svg>
       <span>本地音视频播放器</span>
     </div>
-    <input id="search-box" type="search" placeholder="搜索当前目录…" autocomplete="off">
+    <input id="search-box" type="search" placeholder="搜索全部资源…" aria-label="搜索全部资源" autocomplete="off">
   </header>
 
   <div class="content">
@@ -27,8 +27,8 @@
       <div id="resume-cards" class="resume-cards"></div>
     </div>
     <nav id="breadcrumb" class="breadcrumb"></nav>
-    <div class="list-meta" id="list-meta"></div>
-    <div id="file-grid" class="file-grid"></div>
+    <div class="list-meta" id="list-meta" aria-live="polite"></div>
+    <div id="file-grid" class="file-grid" aria-live="polite"></div>
     <div id="empty-tip" class="empty-tip hidden">
       <div class="empty-icon">🎬</div>
       <p id="empty-text">这个目录还没有音视频文件</p>
@@ -80,6 +80,7 @@
   </div>
 </div>
 
+<script src="/static/utils.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

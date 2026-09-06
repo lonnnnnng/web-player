@@ -47,7 +47,7 @@
 ## 远期 / 工程化
 
 - [ ] 补 LICENSE（当前仓库缺失）
-- [ ] 抽取 `resolve_under_root`、Range 解析、`srtToVtt` 为可测纯函数并加单测（安全性所在）
+- [x] 抽取 `resolve_under_root`、Range 解析、`srtToVtt` 为可测纯函数并加单测（安全性所在）
 - [ ] ffmpeg 检测 + 实时转码端点（直接播放 avi/rmvb 等老格式，可选能力）
 - [ ] 收藏/星标
 - [ ] 音频专辑视图（按文件夹成专辑，纯 JS 解析 ID3/FLAC 内嵌封面）
