@@ -37,11 +37,11 @@
 
 ## 阶段 3：进阶
 
-- [ ] **视频缩略图**：复用现有 IntersectionObserver 探测机制，seek 到 10% 处 canvas 截帧，
+- [x] **视频缩略图**：复用现有 IntersectionObserver 探测机制，seek 到 10% 处 canvas 截帧，
   结果按 mtime 缓存到 localStorage；解码失败回退现有图标。
-- [ ] **移动端体验包**：Media Session API（锁屏封面/控制）、PWA manifest（添加到主屏幕）、
+- [x] **移动端体验包**：Media Session API（锁屏封面/控制）、PWA manifest（添加到主屏幕）、
   双击左右区域快退快进。
-- [ ] **HTTP 缓存**：`/api/file` 补 `Last-Modified`/`ETag`（重播同一视频可走缓存）；
+- [x] **HTTP 缓存**：`/api/file` 补 `Last-Modified`/`ETag`（重播同一视频可走缓存）；
   静态文件补缓存头，避免每次全量读入内存。
 
 ## 远期 / 工程化

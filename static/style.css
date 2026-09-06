@@ -87,6 +87,11 @@ body {
   position: relative;
 }
 .file-thumb svg { width: 44px; height: 44px; }
+.file-thumb.has-thumb {
+  background-size: cover;
+  background-position: center;
+}
+.file-thumb.has-thumb > svg { display: none; }
 .file-thumb .thumb-badge {
   position: absolute; right: 8px; bottom: 8px;
   background: rgba(0,0,0,.72); color: #fff;

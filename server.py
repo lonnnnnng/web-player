@@ -58,6 +58,7 @@ STATIC_MIME = {
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".ico": "image/x-icon",
+    ".webmanifest": "application/manifest+json",
 }
 
 # 全局配置（启动时由 main() 填充）
@@ -214,12 +215,20 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "not found")
             return
         ext = os.path.splitext(fp)[1].lower()
+        st = os.stat(fp)
+        etag = '"%d-%d"' % (st.st_size, int(st.st_mtime))
+        if self.headers.get("If-None-Match", "").strip() == etag:
+            self.send_response(304)
+            self.end_headers()
+            return
         with open(fp, "rb") as f:
             data = f.read()
         self.send_response(200)
         self.send_header("Content-Type", STATIC_MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "max-age=300")
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", self.date_time_string(int(st.st_mtime)))
         self.end_headers()
         self.wfile.write(data)
 
@@ -371,11 +380,28 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
 
         ext = os.path.splitext(target)[1].lower()
         ctype = MIME.get(ext, "application/octet-stream")
-        size = os.path.getsize(target)
+        st = os.stat(target)
+        size = st.st_size
+        etag = '"%d-%d"' % (size, int(st.st_mtime))
+        last_modified = self.date_time_string(int(st.st_mtime))
 
         range_header = self.headers.get("Range")
         start, end = 0, size - 1
         status = 200
+
+        if range_header:
+            # If-Range 与当前文件不符（已更换/修改）时应忽略 Range，回退整文件 200
+            if_range = self.headers.get("If-Range", "").strip()
+            if if_range and if_range != etag and if_range != last_modified:
+                range_header = None
+        else:
+            # 无 Range 的完整请求：内容未变则 304，浏览器直接复用缓存
+            if self.headers.get("If-None-Match", "").strip() == etag or \
+                    (not self.headers.get("If-None-Match")
+                     and self.headers.get("If-Modified-Since", "").strip() == last_modified):
+                self.send_response(304)
+                self.end_headers()
+                return
 
         if range_header:
             m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
@@ -399,6 +425,9 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", last_modified)
         if status == 206:
             self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         filename = os.path.basename(target)

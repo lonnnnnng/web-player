@@ -67,23 +67,114 @@ let currentPath = "";
 let searchActive = false;    // 当前展示的是搜索结果还是目录列表
 let searchSeq = 0;           // 搜索请求序号，丢弃过期响应
 
+/* ---------------- 缩略图与时长探测（懒加载 + localStorage 缓存） ---------------- */
+
+function thumbKey(path) { return "vp-thumb:" + path; }
+
+const thumbProbing = new Set();   // 正在探测的 path，避免重复
+
+function readThumbCache(path, mtime, size) {
+  try {
+    const c = JSON.parse(localStorage.getItem(thumbKey(path)));
+    if (c && c.m === mtime && c.s === size) return c;
+    if (c) localStorage.removeItem(thumbKey(path));   // 文件已变，缓存作废
+  } catch { /* 忽略坏缓存 */ }
+  return null;
+}
+
+function writeThumbCache(path, mtime, size, rec) {
+  const payload = JSON.stringify(Object.assign({ m: mtime, s: size, at: Date.now() }, rec));
+  try {
+    localStorage.setItem(thumbKey(path), payload);
+  } catch {
+    evictThumbCache();   // 配额满：淘汰最旧的再试一次
+    try { localStorage.setItem(thumbKey(path), payload); } catch { /* 彻底失败则放弃 */ }
+  }
+}
+
+function evictThumbCache() {
+  const entries = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !k.startsWith("vp-thumb:")) continue;
+    let at = 0;
+    try { at = Number(JSON.parse(localStorage.getItem(k)).at) || 0; } catch { /* 忽略 */ }
+    entries.push([k, at]);
+  }
+  entries.sort((a, b) => a[1] - b[1]);
+  for (let i = 0; i < Math.max(1, Math.ceil(entries.length / 4)); i++) {
+    localStorage.removeItem(entries[i][0]);
+  }
+}
+
+function applyThumbImage(thumbEl, dataUrl) {
+  thumbEl.classList.add("has-thumb");
+  thumbEl.style.backgroundImage = `url("${dataUrl}")`;
+}
+
 const durationObserver = new IntersectionObserver((entries) => {
   for (const en of entries) {
     if (!en.isIntersecting) continue;
     durationObserver.unobserve(en.target);
-    const path = en.target.dataset.path;
-    const badge = en.target.querySelector(".thumb-badge");
-    const probe = document.createElement("video");
-    probe.preload = "metadata";
-    probe.muted = true;
-    probe.src = "/api/file?path=" + encodeURIComponent(path);
-    probe.onloadedmetadata = () => {
-      const d = formatDuration(probe.duration);
-      if (d && badge) badge.textContent = d;
-      probe.src = "";
-    };
+    probeCardMedia(en.target);
   }
 }, { rootMargin: "120px" });
+
+// 探测时长（音频/视频通用）；视频顺带在 10% 处截一帧做缩略图
+function probeCardMedia(thumbEl) {
+  const path = thumbEl.dataset.path;
+  if (!path || thumbProbing.has(path)) return;
+  thumbProbing.add(path);
+  const isAudio = thumbEl.dataset.kind === "audio";
+  const mtime = Number(thumbEl.dataset.mtime) || 0;
+  const size = Number(thumbEl.dataset.size) || 0;
+  const badge = thumbEl.querySelector(".thumb-badge");
+
+  const probe = document.createElement("video");
+  probe.preload = "metadata";
+  probe.muted = true;
+  let settled = false;
+  const timer = setTimeout(() => finish(null, null), 6000);
+
+  const finish = (duration, dataUrl) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (duration && badge) badge.textContent = formatDuration(duration);
+    if (dataUrl) {
+      // 应用到所有同路径的缩略图容器（可能同时存在列表页和搜索结果）
+      document.querySelectorAll(`.file-thumb[data-path="${CSS.escape(path)}"]`)
+        .forEach(el => applyThumbImage(el, dataUrl));
+    }
+    if (duration || dataUrl) writeThumbCache(path, mtime, size, { d: duration, u: dataUrl });
+    thumbProbing.delete(path);
+    probe.onloadedmetadata = probe.onseeked = probe.onerror = null;
+    probe.removeAttribute("src");
+    probe.load();
+  };
+
+  probe.onerror = () => finish(null, null);
+  probe.onloadedmetadata = () => {
+    const d = probe.duration;
+    if (!isFinite(d) || d <= 0) { finish(null, null); return; }
+    if (badge) badge.textContent = formatDuration(d);
+    if (isAudio) { finish(d, null); return; }
+    // 截帧位置：10% 处（极短视频取 0.1s，避免黑屏首帧）
+    probe.currentTime = Math.min(Math.max(d * 0.1, 0.1), Math.max(d - 0.1, 0.1));
+    probe.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        const w = 320;
+        const h = Math.max(60, Math.round(w * (probe.videoHeight || 180) / (probe.videoWidth || 320)));
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(probe, 0, 0, w, h);
+        finish(d, canvas.toDataURL("image/jpeg", 0.6));
+      } catch { finish(d, null); }
+    };
+  };
+  probe.src = "/api/file?path=" + encodeURIComponent(path);
+}
 
 const listingCache = new Map();    // path -> {data, json}，返回目录时秒开
 const scrollPositions = new Map(); // path -> 滚动位置
@@ -292,7 +383,14 @@ function renderGrid() {
     card.onclick = () => navigate("#/watch/" + encodePath(vPath));
     const thumb = card.querySelector(".file-thumb");
     thumb.dataset.path = vPath;
-    durationObserver.observe(thumb);
+    thumb.dataset.mtime = v.mtime;
+    thumb.dataset.size = v.size;
+    const cached = readThumbCache(vPath, v.mtime, v.size);
+    if (cached) {
+      if (cached.d) thumb.querySelector(".thumb-badge").textContent = formatDuration(cached.d);
+      if (cached.u) applyThumbImage(thumb, cached.u);
+    }
+    if (!cached || !cached.u) durationObserver.observe(thumb);   // 缩略图缺失（含上次截帧失败）则重新探测
     grid.appendChild(card);
   }
 
@@ -311,7 +409,12 @@ function renderGrid() {
     card.onclick = () => navigate("#/watch/" + encodePath(aPath));
     const thumb = card.querySelector(".file-thumb");
     thumb.dataset.path = aPath;
-    durationObserver.observe(thumb);
+    thumb.dataset.mtime = a.mtime;
+    thumb.dataset.size = a.size;
+    thumb.dataset.kind = "audio";
+    const cachedA = readThumbCache(aPath, a.mtime, a.size);
+    if (cachedA && cachedA.d) thumb.querySelector(".thumb-badge").textContent = formatDuration(cachedA.d);
+    if (!cachedA || !cachedA.d) durationObserver.observe(thumb);
     grid.appendChild(card);
   }
 
@@ -521,6 +624,7 @@ async function renderWatch(vPath) {
   if (!isAudio) await attachSubtitle(vPath);
   nextMediaPath = findNextMedia(vPath, isAudio) || "";
   $("#btn-next").classList.toggle("hidden", !nextMediaPath);
+  updateMediaSession(vPath);
 }
 
 // 拉取同目录列表，供字幕匹配与连播使用
@@ -534,16 +638,49 @@ async function loadSiblingListing(vPath) {
   } catch { /* 列表拉取失败不影响播放 */ }
 }
 
-// 同目录中排在当前文件之后的下一个媒体（服务端已自然排序）
-function findNextMedia(vPath, isAudio) {
+// 同目录中排在当前文件之前/之后的媒体（服务端已自然排序）
+function findSiblingMedia(vPath, isAudio, offset) {
   if (!currentListing) return null;
   const name = vPath.split("/").pop();
   const pool = isAudio ? (currentListing.audios || []) : (currentListing.videos || []);
   const idx = pool.findIndex(x => x.name === name);
-  if (idx === -1 || idx + 1 >= pool.length) return null;
+  if (idx === -1) return null;
+  const target = pool[idx + offset];
+  if (!target) return null;
   const dir = vPath.split("/").slice(0, -1).join("/");
-  const nextName = pool[idx + 1].name;
-  return dir ? dir + "/" + nextName : nextName;
+  return dir ? dir + "/" + target.name : target.name;
+}
+
+function findNextMedia(vPath, isAudio) { return findSiblingMedia(vPath, isAudio, 1); }
+
+function stepMedia(offset) {
+  if (!currentWatchPath) return;
+  const target = findSiblingMedia(currentWatchPath, isAudioFile(currentWatchPath.split("/").pop()), offset);
+  if (target) navigate("#/watch/" + encodePath(target));
+}
+
+// 锁屏/系统级播放控制（手机息屏后仍可上下首与封面）
+function updateMediaSession(vPath) {
+  if (!("mediaSession" in navigator)) return;
+  try {
+    const name = vPath.split("/").pop();
+    let artwork = [];
+    if (currentListing) {
+      const pool = isAudioFile(name) ? (currentListing.audios || []) : (currentListing.videos || []);
+      const item = pool.find(x => x.name === name);
+      if (item) {
+        const c = readThumbCache(vPath, item.mtime, item.size);
+        if (c && c.u) artwork = [{ src: c.u, sizes: "320x180", type: "image/jpeg" }];
+      }
+    }
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: name,
+      artist: vPath.split("/").slice(0, -1).join("/") || "本地音视频播放器",
+      artwork,
+    });
+    navigator.mediaSession.setActionHandler("previoustrack", () => stepMedia(-1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => stepMedia(1));
+  } catch { /* 浏览器不支持相应能力时忽略 */ }
 }
 
 // 音频封面上的均衡器动画随播放状态启停
@@ -750,6 +887,26 @@ $("#btn-autonext").addEventListener("click", () => {
   updateAutonextBtn();
 });
 updateAutonextBtn();
+// 系统级播放/暂停/快进快退（Media Session）
+if ("mediaSession" in navigator) {
+  try {
+    navigator.mediaSession.setActionHandler("play", () => video.play());
+    navigator.mediaSession.setActionHandler("pause", () => video.pause());
+    navigator.mediaSession.setActionHandler("seekbackward", () => { video.currentTime = Math.max(0, video.currentTime - 10); });
+    navigator.mediaSession.setActionHandler("seekforward", () => { video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); });
+  } catch { /* 浏览器不支持 */ }
+}
+
+// 触屏设备双击视频左/右区域快退/快进（桌面端双击保留浏览器全屏切换）
+video.addEventListener("dblclick", (e) => {
+  if (!matchMedia("(pointer: coarse)").matches) return;
+  if (video.classList.contains("is-audio") || !isFinite(video.duration)) return;
+  const rect = video.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width;
+  if (x < 0.4) video.currentTime = Math.max(0, video.currentTime - 10);
+  else if (x > 0.6) video.currentTime = Math.min(video.duration, video.currentTime + 10);
+});
+
 $("#btn-next").addEventListener("click", () => {
   if (nextMediaPath) navigate("#/watch/" + encodePath(nextMediaPath));
 });
