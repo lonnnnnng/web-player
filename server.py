@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -318,20 +319,98 @@ def load_config_file():
     return {}
 
 
-def get_local_ip():
-    """获取本机局域网 IP（UDP connect 不实际发包，仅确定路由）。"""
+def _udp_local_ip(target):
+    """UDP connect 到目标拿本机出口地址（不实际发包）。失败返回空串。"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        s.connect((target, 9))
+        return s.getsockname()[0]
     except OSError:
-        try:
-            ip = socket.gethostbyname(socket.gethostname())
-        except OSError:
-            ip = "127.0.0.1"
+        return ""
     finally:
         s.close()
-    return ip
+
+
+def _is_private_lan(ip):
+    """RFC1918 私网地址（排除代理软件常用的 198.18.0.0/15 fake-ip 段等）。"""
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$", ip or "")
+    if not m:
+        return False
+    a, b = int(m.group(1)), int(m.group(2))
+    if a == 10 or (a == 192 and b == 168):
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    return False
+
+
+def _get_gateways():
+    """按优先级返回默认网关 IP 列表。"""
+    gateways = []
+
+    if os.name == "nt":
+        try:
+            out = subprocess.run(["route", "print", "-4"], capture_output=True,
+                                 text=True, timeout=5, encoding="utf-8", errors="replace").stdout
+            for line in out.splitlines():
+                parts = line.split()
+                # 默认路由行: 0.0.0.0  0.0.0.0  <网关>  <接口>  <跃点数>
+                if len(parts) >= 3 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+                    gw = parts[2]
+                    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", gw) and gw != "0.0.0.0" and gw not in gateways:
+                        gateways.append(gw)
+        except Exception:
+            pass
+    else:
+        # Linux: /proc/net/route（网关为小端十六进制）
+        try:
+            with open("/proc/net/route") as f:
+                lines = f.readlines()[1:]
+            for line in lines:
+                parts = line.split()
+                if len(parts) > 2 and parts[1] == "00000000" and parts[2] != "00000000":
+                    n = int(parts[2], 16)
+                    gw = "%d.%d.%d.%d" % (n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF)
+                    if gw not in gateways:
+                        gateways.append(gw)
+        except Exception:
+            pass
+        # macOS 兜底
+        if not gateways:
+            try:
+                out = subprocess.run(["route", "-n", "get", "default"], capture_output=True,
+                                     text=True, timeout=5).stdout
+                for line in out.splitlines():
+                    s = line.strip()
+                    if s.startswith("gateway:"):
+                        gw = s.split()[-1]
+                        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", gw) and gw not in gateways:
+                            gateways.append(gw)
+            except Exception:
+                pass
+    return gateways
+
+
+def get_local_ip():
+    """获取局域网 IP：优先沿默认网关探测（虚拟网卡/代理不干扰），多级兜底。"""
+    # 1) 逐个默认网关尝试：UDP 探测到网关方向的本机地址，即真实局域网 IP
+    for gw in _get_gateways():
+        ip = _udp_local_ip(gw)
+        if ip and _is_private_lan(ip):
+            return ip
+    # 2) 兜底：外网方向探测（可能被代理虚拟网卡干扰，过滤非私网结果）
+    ip = _udp_local_ip("8.8.8.8")
+    if ip and _is_private_lan(ip):
+        return ip
+    # 3) 兜底：枚举本机网卡地址，取第一个私网地址
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if _is_private_lan(ip):
+                return ip
+    except OSError:
+        pass
+    return "127.0.0.1"
 
 
 def main():
@@ -340,7 +419,12 @@ def main():
     parser.add_argument("--port", "-p", type=int, help="监听端口，默认 8080")
     parser.add_argument("--host", default=None, help="监听地址，默认 0.0.0.0")
     parser.add_argument("--password", help="访问密码（HTTP Basic，留空则不启用）")
+    parser.add_argument("--print-ip", action="store_true", help="打印本机局域网 IP 后退出（供启动脚本调用）")
     args = parser.parse_args()
+
+    if args.print_ip:
+        print(get_local_ip())
+        return
 
     file_cfg = load_config_file()
 

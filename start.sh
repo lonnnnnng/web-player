@@ -49,15 +49,13 @@ get_port() {
     echo "${port:-8080}"
 }
 
-# 获取本机局域网 IP（复用服务端同款逻辑，python 是运行必需依赖）
+# 获取本机局域网 IP（复用服务端同款逻辑：沿默认网关探测，单一实现保证一致）
 get_ip() {
-    "$PYTHON" -c "import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.connect(('8.8.8.8', 80))
-    print(s.getsockname()[0])
-except OSError:
-    print('127.0.0.1')" 2>/dev/null
+    ip=$("$PYTHON" "$SCRIPT_DIR/server.py" --print-ip 2>/dev/null)
+    if [ -z "$ip" ]; then
+        ip="127.0.0.1"
+    fi
+    echo "$ip"
 }
 
 print_urls() {
