@@ -29,6 +29,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 支持的视频扩展名
 VIDEO_EXTS = {".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flv",
               ".ts", ".mts", ".m2ts", ".wmv", ".mpg", ".mpeg", ".3gp", ".ogv"}
+# 支持的音频扩展名（浏览器可直接解码的格式）
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"}
 # 支持的字幕扩展名（浏览器可显示的，或前端可转换的）
 SUB_EXTS = {".srt", ".vtt"}
 
@@ -38,6 +40,9 @@ MIME = {
     ".webm": "video/webm", ".ogv": "video/ogg",
     ".mov": "video/quicktime",
     ".ts": "video/mp2t", ".mts": "video/mp2t", ".m2ts": "video/mp2t",
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+    ".flac": "audio/flac", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
     ".srt": "text/plain; charset=utf-8", ".vtt": "text/vtt; charset=utf-8",
 }
 
@@ -181,7 +186,7 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "目录不存在")
             return
 
-        dirs, videos, subs = [], [], []
+        dirs, videos, audios, subs = [], [], [], []
         try:
             entries = os.scandir(target)
         except PermissionError:
@@ -205,6 +210,9 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
                         if ext in VIDEO_EXTS:
                             item["kind"] = "video"
                             videos.append(item)
+                        elif ext in AUDIO_EXTS:
+                            item["kind"] = "audio"
+                            audios.append(item)
                         elif ext in SUB_EXTS:
                             item["kind"] = "subtitle"
                             subs.append(item)
@@ -213,12 +221,14 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
 
         dirs.sort(key=lambda x: x["name"].lower())
         videos.sort(key=lambda x: x["name"].lower())
+        audios.sort(key=lambda x: x["name"].lower())
         subs.sort(key=lambda x: x["name"].lower())
 
         self.send_json({
             "path": rel.strip("/"),
             "dirs": dirs,
             "videos": videos,
+            "audios": audios,
             "subs": subs,
         })
 

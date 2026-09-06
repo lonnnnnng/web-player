@@ -93,6 +93,8 @@ body {
   font-size: 12px; padding: 2px 7px; border-radius: 5px;
 }
 .file-card.is-dir .file-thumb { background: linear-gradient(135deg, #1e2a3e 0%, #17202e 100%); }
+.file-card.is-audio .file-thumb { background: linear-gradient(135deg, #12332c 0%, #0f2420 100%); }
+.file-card.is-audio .file-thumb svg { color: #2fbf9a; }
 .file-info { padding: 10px 12px 12px; }
 .file-name {
   font-size: 14px; line-height: 1.45; font-weight: 500;
@@ -140,6 +142,63 @@ body {
   width: 100%; aspect-ratio: 16/9;
   background: #000; border-radius: 12px;
   outline: none;
+}
+/* 音频模式：封面面板 + 紧凑控制条 */
+#audio-cover.hidden + #video { border-radius: 12px; }
+#video.is-audio {
+  aspect-ratio: auto; height: 56px;
+  border-radius: 0 0 12px 12px;
+}
+.audio-cover {
+  display: flex; align-items: center; gap: 28px;
+  background: linear-gradient(135deg, #16443a 0%, #0f2b25 60%, #0d2320 100%);
+  border: 1px solid #1d4a3f; border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  padding: 44px 40px;
+}
+.cover-art {
+  width: 132px; height: 132px; flex: none;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #2fbf9a 0%, #1d8a70 100%);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 10px 30px rgba(47, 191, 154, .25);
+  color: #0c221d;
+}
+.cover-art svg { width: 72px; height: 72px; }
+.cover-meta { min-width: 0; }
+.cover-title {
+  font-size: 22px; font-weight: 700;
+  word-break: break-all;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cover-sub { color: #7dc9b5; font-size: 14px; margin-top: 8px; }
+.eq { display: flex; align-items: flex-end; gap: 4px; height: 22px; margin-top: 16px; }
+.eq span {
+  width: 5px; height: 100%;
+  background: linear-gradient(to top, #2fbf9a, #63e0c0);
+  border-radius: 3px;
+  transform-origin: bottom;
+  transform: scaleY(0.25);
+  animation: eq-bounce 1s ease-in-out infinite;
+  animation-play-state: paused;
+  opacity: .85;
+}
+.eq span:nth-child(1) { animation-delay: 0s; }
+.eq span:nth-child(2) { animation-delay: .18s; }
+.eq span:nth-child(3) { animation-delay: .36s; }
+.eq span:nth-child(4) { animation-delay: .1s; }
+.eq span:nth-child(5) { animation-delay: .28s; }
+.audio-cover.playing .eq span { animation-play-state: running; }
+@keyframes eq-bounce {
+  0%, 100% { transform: scaleY(0.25); }
+  50%      { transform: scaleY(1); }
+}
+@media (max-width: 640px) {
+  .audio-cover { padding: 26px 20px; gap: 18px; }
+  .cover-art { width: 84px; height: 84px; }
+  .cover-art svg { width: 48px; height: 48px; }
+  .cover-title { font-size: 17px; }
 }
 .resume-toast {
   position: absolute; margin: -70px 0 0 40px;

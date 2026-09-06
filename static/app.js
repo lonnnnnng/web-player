@@ -31,6 +31,16 @@ const DIR_SVG = '<svg viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 0 1 2-
 
 const VIDEO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" fill="#6c5ce7"/><path d="M10 9l6 3-6 3V9z" fill="#fff"/></svg>';
 
+const AUDIO_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 18.5a2.5 2.5 0 1 1-2-2.45V6.2a1 1 0 0 1 .76-.97l8.5-2.1A1 1 0 0 1 17.5 4.1v10.95a2.5 2.5 0 1 1-2-2.45V6.53l-6.5 1.6v10.37z"/></svg>';
+
+// 与服务端 AUDIO_EXTS 保持一致
+const AUDIO_EXTS_JS = ["mp3", "m4a", "aac", "flac", "wav", "ogg", "opus"];
+
+function isAudioFile(name) {
+  const ext = name.split(".").pop().toLowerCase();
+  return AUDIO_EXTS_JS.includes(ext);
+}
+
 /* ---------------- 路由 ---------------- */
 
 function navigate(hash) { location.hash = hash; }
@@ -89,9 +99,9 @@ async function renderBrowse(relPath) {
   currentListing = data;
 
   renderBreadcrumb(relPath);
-  const total = data.dirs.length + data.videos.length;
+  const total = data.dirs.length + data.videos.length + (data.audios || []).length;
   $("#list-meta").textContent =
-    `${data.dirs.length} 个文件夹 · ${data.videos.length} 个视频` + (total === 0 ? "" : "");
+    `${data.dirs.length} 个文件夹 · ${data.videos.length} 个视频 · ${(data.audios || []).length} 个音频` + (total === 0 ? "" : "");
 
   renderGrid();
 }
@@ -140,10 +150,11 @@ function renderGrid() {
 
   const dirs = currentListing.dirs.filter(d => match(d.name));
   const videos = currentListing.videos.filter(v => match(v.name));
+  const audios = (currentListing.audios || []).filter(a => match(a.name));
 
-  if (dirs.length === 0 && videos.length === 0) {
-    showEmpty(kw ? `没有匹配“${searchKeyword}”的结果` : "这个目录还没有视频文件");
-    $("#list-meta").textContent = "0 个文件夹 · 0 个视频";
+  if (dirs.length === 0 && videos.length === 0 && audios.length === 0) {
+    showEmpty(kw ? `没有匹配“${searchKeyword}”的结果` : "这个目录还没有音视频文件");
+    $("#list-meta").textContent = "0 个文件夹 · 0 个视频 · 0 个音频";
     return;
   }
 
@@ -180,8 +191,28 @@ function renderGrid() {
     grid.appendChild(card);
   }
 
-  if (dirs.length + videos.length > 0) {
-    $("#list-meta").textContent = `${dirs.length} 个文件夹 · ${videos.length} 个视频`;
+  for (const a of audios) {
+    const aPath = currentPath ? currentPath + "/" + a.name : a.name;
+    const saved = Number(localStorage.getItem(progressKey(aPath)) || 0);
+    const pct = saved > 0 ? Math.min(100, Math.round(saved * 100)) : 0;
+    const card = document.createElement("div");
+    card.className = "file-card is-audio";
+    card.innerHTML = `
+      <div class="file-thumb">${AUDIO_SVG}<span class="thumb-badge">${a.ext.toUpperCase()}</span></div>
+      ${pct > 0 ? `<div class="progress-bar"><div style="width:${pct}%"></div></div>` : ""}
+      <div class="file-info">
+        <div class="file-name">${escapeHtml(a.name)}</div>
+        <div class="file-sub"><span>${formatSize(a.size)}</span><span>${new Date(a.mtime * 1000).toLocaleDateString()}</span></div>
+      </div>`;
+    card.onclick = () => navigate("#/watch/" + encodePath(aPath));
+    const thumb = card.querySelector(".file-thumb");
+    thumb.dataset.path = aPath;
+    durationObserver.observe(thumb);
+    grid.appendChild(card);
+  }
+
+  if (dirs.length + videos.length + audios.length > 0) {
+    $("#list-meta").textContent = `${dirs.length} 个文件夹 · ${videos.length} 个视频 · ${audios.length} 个音频`;
   }
 }
 
@@ -197,11 +228,17 @@ $("#search-box").addEventListener("input", (e) => {
 /* ---------------- 播放页 ---------------- */
 
 const video = $("#video");
+const audioCover = $("#audio-cover");
 let saveTimer = null;
 
 async function renderWatch(vPath) {
   const name = vPath.split("/").pop();
+  const isAudio = isAudioFile(name);
   $("#player-title").textContent = name;
+  audioCover.classList.toggle("hidden", !isAudio);
+  video.classList.toggle("is-audio", isAudio);
+  $("#audio-title").textContent = name;
+  audioCover.classList.remove("playing");
 
   // 清理旧的字幕轨道
   video.querySelectorAll("track").forEach(t => t.remove());
@@ -211,9 +248,14 @@ async function renderWatch(vPath) {
   video.src = "/api/file?path=" + encodeURIComponent(vPath);
   video.playbackRate = Number($("#speed-select").value) || 1;
 
-  await attachSubtitle(vPath);
+  if (!isAudio) await attachSubtitle(vPath);
   restoreProgress(vPath);
 }
+
+// 音频封面上的均衡器动画随播放状态启停
+video.addEventListener("play", () => audioCover.classList.add("playing"));
+video.addEventListener("pause", () => audioCover.classList.remove("playing"));
+video.addEventListener("ended", () => audioCover.classList.remove("playing"));
 
 async function attachSubtitle(vPath) {
   if (!currentListing) {

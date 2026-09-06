@@ -24,7 +24,7 @@
     <div id="file-grid" class="file-grid"></div>
     <div id="empty-tip" class="empty-tip hidden">
       <div class="empty-icon">🎬</div>
-      <p id="empty-text">这个目录还没有视频文件</p>
+      <p id="empty-text">这个目录还没有音视频文件</p>
     </div>
   </div>
 </div>
@@ -51,6 +51,16 @@
   </div>
 
   <div class="player-wrap">
+    <div id="audio-cover" class="audio-cover hidden">
+      <div class="cover-art">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M9 18.5a2.5 2.5 0 1 1-2-2.45V6.2a1 1 0 0 1 .76-.97l8.5-2.1A1 1 0 0 1 17.5 4.1v10.95a2.5 2.5 0 1 1-2-2.45V6.53l-6.5 1.6v10.37z" fill="currentColor"/><path d="M9 7.6l8.5-2.1v1.55L9 9.15V7.6z" fill="currentColor" opacity=".55"/></svg>
+      </div>
+      <div class="cover-meta">
+        <div id="audio-title" class="cover-title"></div>
+        <div class="cover-sub">正在播放音频</div>
+        <div class="eq" id="eq-bars"><span></span><span></span><span></span><span></span><span></span></div>
+      </div>
+    </div>
     <video id="video" controls autoplay playsinline></video>
     <div id="resume-toast" class="resume-toast hidden"></div>
   </div>
