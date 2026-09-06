@@ -137,6 +137,7 @@ body {
 }
 .player-wrap {
   max-width: 1280px; margin: 0 auto; padding: 20px 24px 40px;
+  position: relative;
 }
 #video {
   width: 100%; aspect-ratio: 16/9;
@@ -212,6 +213,18 @@ body {
   padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
 }
 .resume-toast button.ghost { background: transparent; border: 1px solid #3a4055; color: var(--text-dim); }
+
+.video-error {
+  position: absolute; left: 50%; top: 32%;
+  transform: translate(-50%, -50%);
+  background: rgba(23, 26, 35, 0.96);
+  border: 1px solid #6b3d4b;
+  padding: 16px 22px; border-radius: 10px;
+  text-align: center; z-index: 6; max-width: 86%;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.video-error-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+.video-error-text { color: var(--text-dim); font-size: 13px; line-height: 1.7; word-break: break-all; }
 
 /* ===== 移动端 ===== */
 @media (max-width: 640px) {

@@ -138,6 +138,31 @@ function showEmpty(text) {
 
 function progressKey(path) { return "vp-progress:" + path; }
 
+// 进度存储 v2：{"t": 已看秒数, "d": 总时长秒数}。兼容 v1（0~1 的比例数字，无绝对时间）。
+function readProgress(path) {
+  const raw = localStorage.getItem(progressKey(path));
+  if (!raw) return null;
+  let v;
+  try { v = JSON.parse(raw); } catch { v = Number(raw); }
+  if (typeof v === "number") {
+    return isFinite(v) && v > 0 && v <= 1 ? { ratio: v, frac: v } : null;
+  }
+  if (v && typeof v === "object" && isFinite(v.t) && isFinite(v.d) && v.d > 0 && v.t >= 0) {
+    return { t: v.t, d: v.d, frac: Math.min(1, v.t / v.d) };
+  }
+  return null;
+}
+
+function writeProgress(path, t, d) {
+  if (!isFinite(t) || !isFinite(d) || d <= 0) return;
+  localStorage.setItem(progressKey(path), JSON.stringify({ t: Math.round(t * 10) / 10, d: Math.round(d * 10) / 10 }));
+}
+
+function progressPct(path) {
+  const p = readProgress(path);
+  return p ? Math.min(100, Math.round(p.frac * 100)) : 0;
+}
+
 function renderGrid() {
   const grid = $("#file-grid");
   grid.innerHTML = "";
@@ -173,8 +198,7 @@ function renderGrid() {
 
   for (const v of videos) {
     const vPath = currentPath ? currentPath + "/" + v.name : v.name;
-    const saved = Number(localStorage.getItem(progressKey(vPath)) || 0);
-    const pct = saved > 0 ? Math.min(100, Math.round(saved * 100)) : 0;
+    const pct = progressPct(vPath);
     const card = document.createElement("div");
     card.className = "file-card";
     card.innerHTML = `
@@ -193,8 +217,7 @@ function renderGrid() {
 
   for (const a of audios) {
     const aPath = currentPath ? currentPath + "/" + a.name : a.name;
-    const saved = Number(localStorage.getItem(progressKey(aPath)) || 0);
-    const pct = saved > 0 ? Math.min(100, Math.round(saved * 100)) : 0;
+    const pct = progressPct(aPath);
     const card = document.createElement("div");
     card.className = "file-card is-audio";
     card.innerHTML = `
@@ -229,9 +252,33 @@ $("#search-box").addEventListener("input", (e) => {
 
 const video = $("#video");
 const audioCover = $("#audio-cover");
+const videoError = $("#video-error");
+const resumeToast = $("#resume-toast");
+let currentWatchPath = "";
 let saveTimer = null;
+let resumeTimer = null;
+let resumeState = null;   // 恢复提示当前对应的进度 {path, p}
+let pendingSeek = null;   // 已点"继续播放"但元数据未就绪，等 loadedmetadata 后跳转
+
+function hideResumeToast() {
+  clearTimeout(resumeTimer);
+  resumeTimer = null;
+  resumeState = null;
+  resumeToast.classList.add("hidden");
+}
+
+// 立即保存当前视频进度；须在 currentWatchPath 被覆盖前调用
+function flushProgress() {
+  if (!currentWatchPath || !isFinite(video.duration) || video.duration <= 0) return;
+  if (video.ended || video.error) return;
+  writeProgress(currentWatchPath, video.currentTime, video.duration);
+}
 
 async function renderWatch(vPath) {
+  hideResumeToast();
+  pendingSeek = null;
+  videoError.classList.add("hidden");
+
   const name = vPath.split("/").pop();
   const isAudio = isAudioFile(name);
   $("#player-title").textContent = name;
@@ -248,14 +295,58 @@ async function renderWatch(vPath) {
   video.src = "/api/file?path=" + encodeURIComponent(vPath);
   video.playbackRate = Number($("#speed-select").value) || 1;
 
-  if (!isAudio) await attachSubtitle(vPath);
   restoreProgress(vPath);
+  if (!isAudio) await attachSubtitle(vPath);
 }
 
 // 音频封面上的均衡器动画随播放状态启停
 video.addEventListener("play", () => audioCover.classList.add("playing"));
 video.addEventListener("pause", () => audioCover.classList.remove("playing"));
 video.addEventListener("ended", () => audioCover.classList.remove("playing"));
+
+// 解码失败（浏览器不支持的容器/编码）给出明确提示
+video.addEventListener("error", () => {
+  if (!currentWatchPath || !video.error) return;
+  hideResumeToast();
+  pendingSeek = null;
+  const name = currentWatchPath.split("/").pop();
+  const base = name.replace(/\.[^.]+$/, "");
+  const ext = name.includes(".") ? name.split(".").pop().toUpperCase() : "该";
+  $("#video-error-text").textContent =
+    `浏览器无法解码 ${ext} 格式，可先转码为 MP4 后播放：` +
+    `ffmpeg -i "${name}" -c:v libx264 -c:a aac "${base}.mp4"`;
+  videoError.classList.remove("hidden");
+});
+
+video.addEventListener("loadedmetadata", () => {
+  // 旧版比例进度没有绝对时间，元数据就绪后补出"上次看到 xx:xx"
+  if (resumeState && resumeState.p.t === undefined && !resumeToast.classList.contains("hidden")
+      && isFinite(video.duration) && video.duration > 0) {
+    const el = $("#resume-time");
+    if (el) el.textContent = formatDuration(resumeState.p.ratio * video.duration);
+  }
+  // 元数据未就绪时点过"继续播放"，这里执行跳转
+  if (pendingSeek && pendingSeek.path === currentWatchPath) {
+    const st = pendingSeek;
+    pendingSeek = null;
+    performSeek(st);
+  }
+});
+
+// 按保存的进度跳转；文件时长对不上（±5%，可能已被替换）则作废进度
+function performSeek(st) {
+  if (!isFinite(video.duration) || video.duration <= 0) return;
+  const p = st.p;
+  if (p.t !== undefined) {
+    if (Math.abs(video.duration - p.d) / p.d > 0.05) {
+      localStorage.removeItem(progressKey(st.path));
+      return;
+    }
+    video.currentTime = Math.min(p.t, Math.max(0, video.duration - 1));
+  } else {
+    video.currentTime = p.ratio * video.duration;
+  }
+}
 
 async function attachSubtitle(vPath) {
   if (!currentListing) {
@@ -296,44 +387,43 @@ function srtToVtt(srt) {
 }
 
 function restoreProgress(vPath) {
-  const saved = Number(localStorage.getItem(progressKey(vPath)) || 0);
-  if (saved > 0.02 && saved < 0.97) {
-    const toast = $("#resume-toast");
-    const seekTo = () => {
-      video.currentTime = saved * video.duration;
-      toast.classList.add("hidden");
-    };
-    toast.innerHTML = `上次看到 ${formatDuration(saved * (video.duration || 0)) || "上次位置"} <button id="resume-yes">继续播放</button> <button id="resume-no" class="ghost">从头看</button>`;
-    toast.classList.remove("hidden");
-    $("#resume-yes").onclick = seekTo;
-    $("#resume-no").onclick = () => { localStorage.removeItem(progressKey(vPath)); toast.classList.add("hidden"); };
-    video.addEventListener("loadedmetadata", function once() {
-      video.removeEventListener("loadedmetadata", once);
-      if (!toast.classList.contains("hidden")) {
-        toast.innerHTML = `上次看到 ${formatDuration(saved * video.duration)} <button id="resume-yes">继续播放</button> <button id="resume-no" class="ghost">从头看</button>`;
-        $("#resume-yes").onclick = seekTo;
-        $("#resume-no").onclick = () => { localStorage.removeItem(progressKey(vPath)); toast.classList.add("hidden"); };
-      }
-    });
-    setTimeout(() => toast.classList.add("hidden"), 10000);
-  }
+  const p = readProgress(vPath);
+  if (!p || p.frac <= 0.02 || p.frac >= 0.97) return;
+
+  const st = { path: vPath, p };
+  resumeState = st;
+  resumeToast.innerHTML =
+    `上次看到 <span id="resume-time">${p.t !== undefined ? formatDuration(p.t) : "上次位置"}</span> ` +
+    `<button id="resume-yes">继续播放</button> <button id="resume-no" class="ghost">从头看</button>`;
+  resumeToast.classList.remove("hidden");
+  $("#resume-yes").onclick = () => {
+    hideResumeToast();
+    if (isFinite(video.duration) && video.duration > 0) performSeek(st);
+    else pendingSeek = st;
+  };
+  $("#resume-no").onclick = () => {
+    localStorage.removeItem(progressKey(vPath));
+    hideResumeToast();
+  };
+  resumeTimer = setTimeout(hideResumeToast, 10000);
 }
 
-// 记录播放进度（每 3 秒 / 暂停 / 关闭时保存）
+// 记录播放进度：播放时节流保存（3 秒），暂停/切换视频/关闭页面时立即保存
 video.addEventListener("timeupdate", () => {
-  if (!video.duration || !currentWatchPath) return;
+  if (!currentWatchPath || !isFinite(video.duration) || video.duration <= 0) return;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    if (video.duration > 0) {
-      localStorage.setItem(progressKey(currentWatchPath), String(video.currentTime / video.duration));
-    }
-  }, 3000);
+  saveTimer = setTimeout(flushProgress, 3000);
 });
+video.addEventListener("pause", flushProgress);
 video.addEventListener("ended", () => {
-  if (currentWatchPath) localStorage.setItem(progressKey(currentWatchPath), "1");
+  if (currentWatchPath && isFinite(video.duration) && video.duration > 0) {
+    writeProgress(currentWatchPath, video.duration, video.duration);
+  }
 });
-
-let currentWatchPath = "";
+window.addEventListener("pagehide", flushProgress);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushProgress();
+});
 
 /* ---------------- 播放页快捷键 ---------------- */
 
@@ -375,6 +465,7 @@ $("#btn-back").addEventListener("click", goBackToBrowse);
 
 function render() {
   const route = parseRoute();
+  flushProgress();   // currentWatchPath 被覆盖前保存上一个视频的进度
   if (route.page === "watch") {
     browsePage.classList.add("hidden");
     playerPage.classList.remove("hidden");
