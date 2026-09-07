@@ -21,12 +21,35 @@ LOG_FILE="$SCRIPT_DIR/player.log"
 # 优先使用 python3
 PYTHON="$(command -v python3 || command -v python)"
 if [ -z "$PYTHON" ]; then
-    echo "错误: 未找到 python3，请先安装 (sudo apt install python3)"
+    echo "错误: 未找到 python3，请先安装 Python 3"
     exit 1
 fi
 
+load_identity() {
+    [ -f "$PID_FILE" ] || return 1
+    {
+        IFS= read -r player_pid && IFS= read -r instance_token && IFS= read -r started_at
+    } < "$PID_FILE" || return 1
+    case "$player_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$player_pid" -gt 1 ] 2>/dev/null || return 1
+    case "$instance_token" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#instance_token}" -eq 32 ] && [ -n "$started_at" ]
+}
+
+matches_process() {
+    kill -0 "$player_pid" 2>/dev/null || return 1
+    actual_start=$(LC_ALL=C ps -p "$player_pid" -o lstart= 2>/dev/null) || return 1
+    [ "$actual_start" = "$started_at" ] || return 1
+    process_command=$(ps -ww -p "$player_pid" -o command= 2>/dev/null) || return 1
+    # long: 路径、随机启动标识和出生时间都必须一致，PID 被其他进程复用时绝不能误杀。
+    case "$process_command" in
+        *" $SCRIPT_DIR/server.py --instance-token $instance_token"|*" $SCRIPT_DIR/server.py --instance-token $instance_token "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 is_running() {
-    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    load_identity && matches_process
 }
 
 # 从命令行参数 / config.json 推断端口（与服务端优先级一致）
@@ -68,17 +91,25 @@ print_urls() {
 
 do_start() {
     if is_running; then
-        echo "播放器已在运行 (PID $(cat "$PID_FILE"))，如需重启请执行: bash start.sh restart"
+        echo "播放器已在运行 (PID $player_pid)，如需重启请执行: bash start.sh restart"
         exit 0
     fi
-    rm -f "$PID_FILE"
-    nohup "$PYTHON" "$SCRIPT_DIR/server.py" "$@" >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
+    if [ -f "$PID_FILE" ]; then
+        # long: 旧版仅有 PID 的记录无法证明归属，保留现场，不能覆盖后再失去旧服务的线索。
+        if ! load_identity || kill -0 "$player_pid" 2>/dev/null; then
+            echo "无法确认 player.pid 对应进程的身份；未启动或停止任何进程。请先核实旧服务。"
+            return 1
+        fi
+    fi
+    instance_token=$("$PYTHON" -c 'import uuid; print(uuid.uuid4().hex)') || return 1
+    nohup "$PYTHON" "$SCRIPT_DIR/server.py" --instance-token "$instance_token" "$@" >> "$LOG_FILE" 2>&1 &
+    player_pid=$!
     sleep 1
-    if kill -0 "$pid" 2>/dev/null; then
+    started_at=$(LC_ALL=C ps -p "$player_pid" -o lstart= 2>/dev/null)
+    if matches_process; then
+        printf '%s\n%s\n%s\n' "$player_pid" "$instance_token" "$started_at" > "$PID_FILE"
         echo "=============================================="
-        echo "  播放器已在后台启动 (PID $pid)"
+        echo "  播放器已在后台启动 (PID $player_pid)"
         print_urls "$@"
         echo "  日志文件 : $LOG_FILE"
         echo "  查看日志 : tail -f $LOG_FILE"
@@ -87,34 +118,37 @@ do_start() {
     else
         echo "启动失败！最近日志:"
         tail -n 10 "$LOG_FILE"
-        rm -f "$PID_FILE"
         exit 1
     fi
 }
 
 do_stop() {
     if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        echo "正在停止 (PID $pid)..."
-        kill "$pid" 2>/dev/null
+        echo "正在停止 (PID $player_pid)..."
+        # long: 发信号前再次核对；不使用强制 KILL，避免等待期间 PID 变化或误判归属。
+        matches_process && kill "$player_pid" 2>/dev/null || return 1
         for i in 1 2 3 4 5; do
-            kill -0 "$pid" 2>/dev/null || break
+            matches_process || break
             sleep 1
         done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null
+        if matches_process; then
+            echo "服务尚未退出，已保留 PID 记录；请检查日志后重试。"
+            return 1
         fi
         echo "已停止"
+        rm -f "$PID_FILE"
     else
+        if [ -f "$PID_FILE" ]; then
+            echo "PID 记录过期或身份不匹配，未发送停止信号，已保留 player.pid。"
+            return 1
+        fi
         echo "播放器未在运行"
     fi
-    rm -f "$PID_FILE"
 }
 
 do_status() {
     if is_running; then
-        echo "运行中 (PID $(cat "$PID_FILE"))"
+        echo "运行中 (PID $player_pid)"
     else
         echo "未运行"
     fi
@@ -126,7 +160,7 @@ case "$1" in
         ;;
     restart)
         shift
-        do_stop
+        do_stop || exit 1
         do_start "$@"
         ;;
     status)

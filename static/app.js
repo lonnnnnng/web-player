@@ -4,7 +4,8 @@
 const $ = (sel) => document.querySelector(sel);
 const browsePage = $("#browse-page");
 const playerPage = $("#player-page");
-const { srtToVtt } = window.PlayerUtils;
+const { srtToVtt, createSafeStorage } = window.PlayerUtils;
+const storage = createSafeStorage(() => window.localStorage);
 
 /* ---------------- 工具函数 ---------------- */
 
@@ -82,7 +83,8 @@ function parseRoute() {
 
 /* ---------------- 浏览页 ---------------- */
 
-let currentListing = null;   // 当前目录数据（播放页复用为同目录列表）
+let currentListing = null;   // 仅供浏览页使用，不能覆盖播放页的同目录队列
+let playerListing = null;
 let currentPath = "";
 let searchActive = false;    // 当前展示的是搜索结果还是目录列表
 let searchSeq = 0;           // 搜索请求序号，丢弃过期响应
@@ -95,35 +97,35 @@ const thumbProbing = new Set();   // 正在探测的 path，避免重复
 
 function readThumbCache(path, mtime, size) {
   try {
-    const c = JSON.parse(localStorage.getItem(thumbKey(path)));
+    const c = JSON.parse(storage.getItem(thumbKey(path)));
     if (c && c.m === mtime && c.s === size) return c;
-    if (c) localStorage.removeItem(thumbKey(path));   // 文件已变，缓存作废
+    if (c) storage.removeItem(thumbKey(path));   // 文件已变，缓存作废
   } catch { /* 忽略坏缓存 */ }
   return null;
 }
 
 function writeThumbCache(path, mtime, size, rec) {
   const payload = JSON.stringify(Object.assign({ m: mtime, s: size, at: Date.now() }, rec));
-  try {
-    localStorage.setItem(thumbKey(path), payload);
-  } catch {
-    evictThumbCache();   // 配额满：淘汰最旧的再试一次
-    try { localStorage.setItem(thumbKey(path), payload); } catch { /* 彻底失败则放弃 */ }
-  }
+  storage.setItem(thumbKey(path), payload);
+  evictThumbCache();
 }
 
 function evictThumbCache() {
   const entries = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
+  for (const k of storage.keys()) {
     if (!k || !k.startsWith("vp-thumb:")) continue;
     let at = 0;
-    try { at = Number(JSON.parse(localStorage.getItem(k)).at) || 0; } catch { /* 忽略 */ }
-    entries.push([k, at]);
+    const raw = storage.getItem(k) || "";
+    try { at = Number(JSON.parse(raw).at) || 0; } catch { /* 忽略 */ }
+    entries.push([k, at, raw.length]);
   }
   entries.sort((a, b) => a[1] - b[1]);
-  for (let i = 0; i < Math.max(1, Math.ceil(entries.length / 4)); i++) {
-    localStorage.removeItem(entries[i][0]);
+  let chars = entries.reduce((sum, entry) => sum + entry[2], 0);
+  // long: 缩略图是可重建数据，限制 40 条/约 2 MB，给手机上的播放记录和重试队列预留配额。
+  while (entries.length && (entries.length > 40 || chars > 1000000)) {
+    const [key, , size] = entries.shift();
+    storage.removeItem(key);
+    chars -= size;
   }
 }
 
@@ -211,6 +213,7 @@ window.addEventListener("hashchange", () => {
 
 async function renderBrowse(relPath) {
   currentPath = relPath;
+  currentListing = null;
   lastBrowsePath = relPath;
   searchActive = false;
   searchSeq++;               // 作废在途搜索响应
@@ -258,6 +261,7 @@ async function refreshListing(relPath, seq) {
 }
 
 function applyListing(data, relPath, cacheIt) {
+  if (parseRoute().page !== "browse" || currentPath !== relPath || searchActive) return;
   currentListing = data;
   const json = JSON.stringify(data);
   const cached = listingCache.get(relPath);
@@ -269,7 +273,10 @@ function applyListing(data, relPath, cacheIt) {
     `${data.dirs.length} 个文件夹 · ${data.videos.length} 个视频 · ${(data.audios || []).length} 个音频`;
   renderGrid();
   renderResumeRow();
-  requestAnimationFrame(() => window.scrollTo(0, scrollPositions.get(relPath) || 0));
+  const seq = browseSeq;
+  requestAnimationFrame(() => {
+    if (seq === browseSeq && parseRoute().page === "browse") window.scrollTo(0, scrollPositions.get(relPath) || 0);
+  });
 }
 
 function renderBreadcrumb(relPath) {
@@ -306,7 +313,7 @@ function progressKey(path) { return "vp-progress:" + path; }
 
 // 进度存储 v2：{"t": 已看秒数, "d": 总时长秒数}。兼容 v1（0~1 的比例数字，无绝对时间）。
 function readProgress(path) {
-  const raw = localStorage.getItem(progressKey(path));
+  const raw = storage.getItem(progressKey(path));
   if (!raw) return null;
   let v;
   try { v = JSON.parse(raw); } catch { v = Number(raw); }
@@ -319,37 +326,25 @@ function readProgress(path) {
   return null;
 }
 
-let pushTimer = null;
-const dirtyProgress = new Map();   // 待同步到服务端的进度（path -> 记录）
+const progressSync = window.PlayerProgress.createProgressSync({
+  storage, fetch: (...args) => fetch(...args),
+  beacon: (...args) => navigator.sendBeacon(...args),
+  onChange: () => {
+    if (parseRoute().page !== "browse") return;
+    renderResumeRow();
+    if (!searchActive) renderGrid();
+  },
+});
 
 function writeProgress(path, t, d) {
   if (!isFinite(t) || !isFinite(d) || d <= 0) return;
-  const rec = { t: Math.round(t * 10) / 10, d: Math.round(d * 10) / 10, ts: Math.floor(Date.now() / 1000) };
-  localStorage.setItem(progressKey(path), JSON.stringify(rec));
-  dirtyProgress.set(path, rec);
-  clearTimeout(pushTimer);
-  pushTimer = setTimeout(pushProgressToServer, 3000);
+  progressSync.write(path, t, d);
 }
 
 // 清除进度：本地 + 服务端（"从头看"）
 function removeProgress(path) {
-  localStorage.removeItem(progressKey(path));
-  dirtyProgress.set(path, { t: 0, d: 0, ts: Math.floor(Date.now() / 1000) });
-  clearTimeout(pushTimer);
-  pushTimer = setTimeout(pushProgressToServer, 1000);
-}
-
-// 用 sendBeacon 把待同步进度发给服务端（跨设备续看）
-function pushProgressToServer() {
-  if (!dirtyProgress.size) return;
-  const items = [...dirtyProgress.entries()].map(([path, r]) => Object.assign({ path }, r));
-  dirtyProgress.clear();
-  const payload = JSON.stringify({ items });
-  try {
-    navigator.sendBeacon("/api/progress", new Blob([payload], { type: "application/json" }));
-  } catch {
-    fetch("/api/progress", { method: "POST", body: payload, keepalive: true }).catch(() => {});
-  }
+  if (path === currentWatchPath) progressCleared = true;
+  progressSync.remove(path);
 }
 
 function progressPct(path) {
@@ -455,14 +450,13 @@ function renderResumeRow() {
   const wrap = $("#resume-cards");
   wrap.innerHTML = "";
   const items = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
+  for (const k of storage.keys()) {
     if (!k || !k.startsWith("vp-progress:")) continue;
     const path = k.slice("vp-progress:".length);
     const p = readProgress(path);
     if (!p || p.frac <= 0.02 || p.frac >= 0.97) continue;
     let ts = 0;
-    try { ts = Number(JSON.parse(localStorage.getItem(k)).ts) || 0; } catch { /* 忽略 */ }
+    try { ts = Number(JSON.parse(storage.getItem(k)).ts) || 0; } catch { /* 忽略 */ }
     items.push({ path, frac: p.frac, ts });
   }
   if (currentPath !== "" || searchActive || items.length === 0) {
@@ -489,33 +483,6 @@ function renderResumeRow() {
   sec.classList.remove("hidden");
 }
 
-// 启动时拉取服务端进度合并到本地（跨设备续看；本地较新的记录优先）
-async function syncProgressFromServer() {
-  let items;
-  try {
-    const res = await fetch("/api/progress");
-    items = (await res.json()).items || {};
-  } catch {
-    return; /* 服务端不可达时纯本地模式 */
-  }
-  let changed = false;
-  for (const [path, it] of Object.entries(items)) {
-    if (!it || !isFinite(it.t) || !isFinite(it.d) || !(it.d > 0)) continue;
-    const key = progressKey(path);
-    let localTs = 0;
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      try { localTs = Number(JSON.parse(raw).ts) || 0; } catch { localTs = 0; }
-    }
-    const serverTs = Number(it.ts) || 0;
-    if (serverTs >= localTs) {
-      localStorage.setItem(key, JSON.stringify({ t: it.t, d: it.d, ts: serverTs }));
-      changed = true;
-    }
-  }
-  if (changed) renderResumeRow();
-}
-
 /* ---------------- 全库搜索 ---------------- */
 
 $("#search-box").addEventListener("input", (e) => {
@@ -525,9 +492,12 @@ $("#search-box").addEventListener("input", (e) => {
 });
 
 async function runSearch(kw) {
+  if (parseRoute().page !== "browse") return;
   const seq = ++searchSeq;
+  browseSeq++; // long: 输入搜索后作废目录刷新，避免较晚返回的目录盖掉搜索结果。
   if (!kw) {
-    if (searchActive) renderBrowse(currentPath);
+    // long: 即使搜索结果尚未返回也要重取目录，否则被搜索作废的首次目录请求会留下空页面。
+    renderBrowse(currentPath);
     return;
   }
   let data;
@@ -538,7 +508,7 @@ async function runSearch(kw) {
   } catch {
     return; /* 搜索失败保持现状 */
   }
-  if (seq !== searchSeq) return;   // 已有更新的请求或已切页
+  if (seq !== searchSeq || parseRoute().page !== "browse") return;
   searchActive = true;
   renderSearchResults(data, kw);
 }
@@ -600,6 +570,7 @@ let resumeTimer = null;
 let resumeState = null;   // 恢复提示当前对应的进度 {path, p}
 let pendingSeek = null;   // 已点"继续播放"但元数据未就绪，等 loadedmetadata 后跳转
 let watchRequestSeq = 0;  // 播放页异步请求代次，快速换集时丢弃旧结果
+let progressCleared = false;
 
 function isCurrentWatch(requestSeq, vPath) {
   return requestSeq === watchRequestSeq && currentWatchPath === vPath;
@@ -614,8 +585,14 @@ function hideResumeToast() {
 
 // 立即保存当前视频进度；须在 currentWatchPath 被覆盖前调用
 function flushProgress() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
   if (!currentWatchPath || !isFinite(video.duration) || video.duration <= 0) return;
+  if (video.dataset.watchPath !== currentWatchPath || video.readyState < 1 || video.currentSrc !== video.src) return;
   if (video.ended || video.error) return;
+  // long: 从头看后尚未重新播放就离页时，保留删除版本；只有时间真正前进才建立新进度。
+  if (progressCleared && video.currentTime === 0) return;
+  progressCleared = false;
   writeProgress(currentWatchPath, video.currentTime, video.duration);
 }
 
@@ -650,7 +627,7 @@ async function renderWatch(vPath) {
   const listing = await loadSiblingListing(vPath);
   // long: 视频 A 的目录/字幕请求可能晚于视频 B 返回；只有当前代次才能修改全局列表、字幕和连播状态。
   if (!isCurrentWatch(requestSeq, vPath)) return;
-  currentListing = listing;
+  playerListing = listing;
   if (!isAudio) await attachSubtitle(vPath, listing, requestSeq);
   if (!isCurrentWatch(requestSeq, vPath)) return;
   nextMediaPath = findNextMedia(vPath, isAudio) || "";
@@ -673,9 +650,9 @@ async function loadSiblingListing(vPath) {
 
 // 同目录中排在当前文件之前/之后的媒体（服务端已自然排序）
 function findSiblingMedia(vPath, isAudio, offset) {
-  if (!currentListing) return null;
+  if (!playerListing) return null;
   const name = vPath.split("/").pop();
-  const pool = isAudio ? (currentListing.audios || []) : (currentListing.videos || []);
+  const pool = isAudio ? (playerListing.audios || []) : (playerListing.videos || []);
   const idx = pool.findIndex(x => x.name === name);
   if (idx === -1) return null;
   const target = pool[idx + offset];
@@ -698,8 +675,8 @@ function updateMediaSession(vPath) {
   try {
     const name = vPath.split("/").pop();
     let artwork = [];
-    if (currentListing) {
-      const pool = isAudioFile(name) ? (currentListing.audios || []) : (currentListing.videos || []);
+    if (playerListing) {
+      const pool = isAudioFile(name) ? (playerListing.audios || []) : (playerListing.videos || []);
       const item = pool.find(x => x.name === name);
       if (item) {
         const c = readThumbCache(vPath, item.mtime, item.size);
@@ -835,6 +812,7 @@ function restoreProgress(vPath) {
   };
   $("#resume-no").onclick = () => {
     removeProgress(vPath);
+    if (video.readyState >= 1) video.currentTime = 0;
     hideResumeToast();
   };
   resumeTimer = setTimeout(hideResumeToast, 10000);
@@ -843,8 +821,13 @@ function restoreProgress(vPath) {
 // 记录播放进度：播放时节流保存（3 秒），暂停/切换视频/关闭页面时立即保存
 video.addEventListener("timeupdate", () => {
   if (!currentWatchPath || !isFinite(video.duration) || video.duration <= 0) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushProgress, 3000);
+  if (saveTimer !== null) return;
+  const path = currentWatchPath, seq = watchRequestSeq;
+  // long: 保留首次事件的定时器，后续事件只更新媒体时间；换片后的旧定时器不能保存到新文件。
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    if (isCurrentWatch(seq, path)) flushProgress();
+  }, 3000);
 });
 video.addEventListener("pause", flushProgress);
 video.addEventListener("ended", () => {
@@ -852,14 +835,17 @@ video.addEventListener("ended", () => {
     writeProgress(currentWatchPath, video.duration, video.duration);
   }
   // 自动连播：播完接同目录下一个
-  if (nextMediaPath && localStorage.getItem("vp-autonext") !== "0") {
+  if (nextMediaPath && storage.getItem("vp-autonext") !== "0") {
     navigate("#/watch/" + encodePath(nextMediaPath));
   }
 });
-window.addEventListener("pagehide", () => { flushProgress(); pushProgressToServer(); });
+window.addEventListener("pagehide", () => { flushProgress(); progressSync.flushBeacon(); });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") { flushProgress(); pushProgressToServer(); }
+  if (document.visibilityState === "hidden") { flushProgress(); progressSync.flushBeacon(); }
+  else { progressSync.push(); progressSync.pull(); }
 });
+window.addEventListener("online", () => { progressSync.push(); progressSync.pull(); });
+window.addEventListener("pageshow", () => { progressSync.push(); });
 
 /* ---------------- 播放页快捷键 ---------------- */
 
@@ -876,7 +862,7 @@ document.addEventListener("keydown", (e) => {
     case "ArrowUp": video.volume = Math.min(1, video.volume + 0.1); break;
     case "ArrowDown": video.volume = Math.max(0, video.volume - 0.1); break;
     case "m": case "M":
-      video.muted = !video.muted;
+      toggleSound();
       break;
     case "f": case "F":
       if (document.fullscreenElement) document.exitFullscreen();
@@ -894,17 +880,21 @@ document.addEventListener("keydown", (e) => {
 // 记住倍速、音量、静音
 const speedSelect = $("#speed-select");
 (() => {
-  const savedSpeed = Number(localStorage.getItem("vp-speed"));
+  const savedSpeed = Number(storage.getItem("vp-speed"));
   if ([...speedSelect.options].some(o => Number(o.value) === savedSpeed)) {
     speedSelect.value = String(savedSpeed);
   }
-  const savedVolume = Number(localStorage.getItem("vp-volume"));
-  if (isFinite(savedVolume)) video.volume = Math.min(1, Math.max(0, savedVolume));
-  video.muted = localStorage.getItem("vp-muted") === "1";
+  const rawVolume = storage.getItem("vp-volume");
+  const savedVolume = Number(rawVolume);
+  // long: 没有设置不等于零音量；首次使用保持浏览器默认，同时尊重用户主动保存的零音量。
+  if (rawVolume !== null && rawVolume.trim() !== "" && isFinite(savedVolume)) {
+    try { video.volume = Math.min(1, Math.max(0, savedVolume)); } catch { /* 部分手机由系统管理音量。 */ }
+  }
+  video.muted = storage.getItem("vp-muted") === "1";
 })();
 speedSelect.addEventListener("change", (e) => {
   video.playbackRate = Number(e.target.value);
-  localStorage.setItem("vp-speed", e.target.value);
+  storage.setItem("vp-speed", e.target.value);
 });
 
 // 静音偏好只在用户主动操作时记录：
@@ -915,12 +905,17 @@ function markGesture() {
   inUserGesture = true;
   setTimeout(() => { inUserGesture = false; }, 1000);
 }
-document.addEventListener("pointerdown", markGesture, true);
-document.addEventListener("keydown", markGesture, true);
+video.addEventListener("pointerdown", markGesture, true);
+video.addEventListener("touchstart", markGesture, { passive: true });
+document.addEventListener("keydown", (e) => {
+  if (!playerPage.classList.contains("hidden") && ["ArrowUp", "ArrowDown", "m", "M"].includes(e.key)) markGesture();
+}, true);
 
 video.addEventListener("volumechange", () => {
-  localStorage.setItem("vp-volume", String(video.volume));
-  if (inUserGesture) localStorage.setItem("vp-muted", video.muted ? "1" : "0");
+  if (inUserGesture) {
+    storage.setItem("vp-volume", String(video.volume));
+    storage.setItem("vp-muted", video.muted ? "1" : "0");
+  }
   updateMuteBtn();
 });
 
@@ -929,27 +924,33 @@ const btnMute = $("#btn-mute");
 function updateMuteBtn() {
   btnMute.textContent = (video.muted || video.volume === 0) ? "声音 关" : "声音 开";
 }
-btnMute.addEventListener("click", () => {
-  video.muted = !video.muted;
-  if (!video.muted && video.volume === 0) {
+function toggleSound() {
+  const enable = video.muted || video.volume === 0;
+  video.muted = !enable;
+  if (enable && video.volume === 0) {
     try { video.volume = 1; } catch { /* iOS 上 volume 只读，忽略 */ }
   }
-});
+  // long: 显式按钮操作当场保存，不能依赖异步 volumechange 是否仍处于触屏手势窗口。
+  storage.setItem("vp-volume", String(video.volume));
+  storage.setItem("vp-muted", video.muted ? "1" : "0");
+  updateMuteBtn();
+}
+btnMute.addEventListener("click", toggleSound);
 updateMuteBtn();
 
 // 若被自动播放策略静音、但用户偏好有声，则在播放开始/首次触屏时自动恢复声音
 function tryRestoreSound() {
-  if (video.muted && localStorage.getItem("vp-muted") !== "1") video.muted = false;
+  if (video.muted && storage.getItem("vp-muted") !== "1") video.muted = false;
 }
 video.addEventListener("play", tryRestoreSound);
 document.addEventListener("touchend", tryRestoreSound, { passive: true });
 
 // 连播开关与"下一集"按钮
 function updateAutonextBtn() {
-  $("#btn-autonext").textContent = localStorage.getItem("vp-autonext") === "0" ? "连播 关" : "连播 开";
+  $("#btn-autonext").textContent = storage.getItem("vp-autonext") === "0" ? "连播 关" : "连播 开";
 }
 $("#btn-autonext").addEventListener("click", () => {
-  localStorage.setItem("vp-autonext", localStorage.getItem("vp-autonext") === "0" ? "1" : "0");
+  storage.setItem("vp-autonext", storage.getItem("vp-autonext") === "0" ? "1" : "0");
   updateAutonextBtn();
 });
 updateAutonextBtn();
@@ -989,12 +990,18 @@ $("#btn-back").addEventListener("click", goBackToBrowse);
 
 function render() {
   const route = parseRoute();
+  browseSeq++;
+  searchSeq++;
+  clearTimeout(runSearch._t);
   flushProgress();   // currentWatchPath 被覆盖前保存上一个视频的进度
+  currentWatchPath = "";
+  progressCleared = false;
+  playerListing = null;
+  nextMediaPath = "";
   if (route.page === "watch") {
     browsePage.classList.add("hidden");
     playerPage.classList.remove("hidden");
     currentWatchPath = route.path;
-    currentListing = null;
     renderWatch(route.path);
   } else {
     watchRequestSeq++; // 作废尚未返回的目录和字幕请求，防止离开播放页后回写状态
@@ -1010,4 +1017,5 @@ function render() {
 }
 
 render();
-syncProgressFromServer();   // 拉取服务端进度，合并后刷新"继续观看"
+evictThumbCache(); // long: 升级后也收敛旧版本留下的无限缓存。
+progressSync.start();

@@ -48,6 +48,10 @@ bash start.sh fg         # 前台运行（调试用，Ctrl+C 停止）
 后台启动使用 `nohup`，日志写入 `player.log`，PID 记录在 `player.pid`，
 关掉 SSH 终端后服务继续运行。若日志里提示缺少 `nohup`/`sleep` 等命令属环境异常，正常 Linux 发行版均自带。
 
+Linux/macOS 的停止脚本会核对进程路径、随机启动标识和启动时间，只发送 TERM，不强制 KILL。
+旧版仅一行 PID 的 `player.pid` 无法证明进程归属，脚本会保留它并拒绝停止/覆盖；
+升级前请先用旧服务的管理方式正常停止，核实进程已退出后再移走旧 PID 文件。
+
 **方式二：直接运行**
 
 ```bash
@@ -131,11 +135,41 @@ web-player/
 
 ```bash
 python3 -m unittest discover -s tests -v
-node --test tests/test_frontend_utils.js
+node --test tests/test_frontend_utils.js tests/test_progress.js
 python3 -m py_compile server.py
 node --check static/utils.js
+node --check static/progress.js
 node --check static/app.js
+bash -n start.sh
 ```
+
+### 播放记录的可靠性与边界
+
+- 持续播放约每 3 秒保存本地记录，网络发送再合并约 1 秒；暂停、切换和进入后台立即保存本地。
+- 前台使用 fetch，收到服务端落盘确认后才清除待同步记录。失败按 2～30 秒退避重试，联网或返回前台时立即再试。
+- 待同步队列保存在本地，正常存储环境下刷新后可补传。后台 beacon 只是尽力发送，不当作保存成功。
+- 新旧记录按秒时间戳比较，新客户端保留毫秒精度。同时间戳删除优先，其他冲突保留服务端先保存的版本。
+  清除操作保留 `d: 0` 的删除标记，防止离线设备的旧记录复活；开始新的播放后可产生更新的记录。
+- 多设备需保持系统时间准确；这不是多人实时协作协议。旧版浏览器页面应刷新后再使用新服务端。
+- 浏览器拒绝本地存储时退化为会话内记录，仍尝试网络同步；此时断网并关闭页面，无法保证未上传记录恢复。
+  缩略图限制为 40 条、约 2 MB，配额不足时优先让位给播放记录。
+- 服务端记录读取损坏、权限不足或写盘失败返回 503，并保留原文件；修复权限/磁盘或从备份恢复后重试。
+
+### 手机触屏浏览器回归
+
+真实资源脚本使用 `videos/1.mp4`、`audios/500w播放福利厨房大作战.mp3`、`audios/番外一 .m4a`。
+**只能对隔离测试服务运行**，脚本会注入同步失败和存储不可用情形，不应连接正式记录库：
+
+```bash
+python3 tests/mobile_server.py --dir /path/to/resources
+# 在另一个终端，把下面地址换成上一条命令打印的 TEST_URL
+playwright-cli -s=mobile-regression open http://127.0.0.1:PORT/ --mobile
+playwright-cli -s=mobile-regression run-code --filename tests/browser_mobile.js
+playwright-cli -s=mobile-regression close
+```
+
+截图输出到 `output/playwright/`。浏览器需另行提供 Playwright CLI，不属于应用运行依赖。
+触屏浏览器模拟不能替代 Android/iPhone 真机对系统音量、锁屏及后台存活的验收。
 
 ## 安全说明
 

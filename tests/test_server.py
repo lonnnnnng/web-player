@@ -4,6 +4,8 @@ import os
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 import server
 
@@ -65,12 +67,13 @@ class ServerHTTPTest(unittest.TestCase):
     def request(self, method, target, headers=None, body=None):
         host, port = self.httpd.server_address
         conn = http.client.HTTPConnection(host, port, timeout=3)
-        conn.request(method, target, body=body, headers=headers or {})
-        response = conn.getresponse()
-        payload = response.read()
-        result = response.status, dict(response.getheaders()), payload
-        conn.close()
-        return result
+        try:
+            conn.request(method, target, body=body, headers=headers or {})
+            response = conn.getresponse()
+            payload = response.read()
+            return response.status, dict(response.getheaders()), payload
+        finally:
+            conn.close()
 
     def test_range_and_conditional_file_requests(self):
         status, headers, body = self.request("GET", "/api/file?path=clip.mp4", {"Range": "bytes=2-5"})
@@ -108,6 +111,61 @@ class ServerHTTPTest(unittest.TestCase):
         self.assertEqual(items["clip.mp4"]["t"], 10.0)
         self.assertNotIn("../outside.mp4", items)
         self.assertNotIn("clip.srt", items)
+
+    def post_progress(self, t, d, ts):
+        return self.request("POST", "/api/progress", {"Content-Type": "application/json"},
+                            json.dumps({"items": [{"path": "clip.mp4", "t": t, "d": d, "ts": ts}]}))
+
+    def test_progress_rejects_stale_versions_and_preserves_milliseconds(self):
+        self.post_progress(9, 10, 200.123)
+        status, _, payload = self.post_progress(1, 10, 200.122)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["items"]["clip.mp4"], {"t": 9, "d": 10, "ts": 200.123})
+        self.post_progress(3, 10, 200.123)
+        self.assertEqual(server._load_progress_store()["clip.mp4"]["t"], 9)
+
+    def test_deletion_tombstone_prevents_resurrection_and_allows_new_playback(self):
+        self.post_progress(5, 10, 100)
+        self.post_progress(0, 0, 100)
+        self.post_progress(8, 10, 100)
+        self.post_progress(1, 10, 99)
+        status, _, payload = self.request("GET", "/api/progress")
+        self.assertEqual(json.loads(payload)["items"]["clip.mp4"], {"t": 0, "d": 0, "ts": 100})
+        self.post_progress(2, 10, 100.001)
+        self.assertEqual(server._load_progress_store()["clip.mp4"]["t"], 2)
+
+    def test_failed_persistence_returns_error_and_preserves_previous_file(self):
+        self.post_progress(5, 10, 100)
+        with mock.patch.object(server.os, "replace", side_effect=OSError("disk full")):
+            status, _, payload = self.post_progress(9, 10, 200)
+        self.assertEqual(status, 503)
+        self.assertIn("error", json.loads(payload))
+        self.assertEqual(server._load_progress_store()["clip.mp4"]["t"], 5)
+        self.assertEqual(self.post_progress(9, 10, 200)[0], 200)
+
+    def test_missing_progress_parent_returns_error(self):
+        server.PROGRESS_PATH = os.path.join(self.root, "missing", "progress.json")
+        self.assertEqual(self.post_progress(5, 10, 100)[0], 503)
+
+    def test_corrupt_or_unreadable_store_is_not_overwritten(self):
+        for content in ["{broken", "[]", '{"clip.mp4":{"t":1,"d":10}}']:
+            with open(self.progress_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.assertEqual(self.request("GET", "/api/progress")[0], 503)
+            self.assertEqual(self.post_progress(5, 10, 100)[0], 503)
+            with open(self.progress_file, encoding="utf-8") as f:
+                self.assertEqual(f.read(), content)
+        with mock.patch.object(server, "_load_progress_store", side_effect=PermissionError("denied")):
+            self.assertEqual(self.request("GET", "/api/progress")[0], 503)
+            self.assertEqual(self.post_progress(5, 10, 100)[0], 503)
+
+    def test_concurrent_requests_converge_on_newest_progress(self):
+        # long: 每个并发请求都必须成功，不能让工作线程异常被 unittest 当成通过。
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(self.post_progress, i, 10, 100 + i / 1000) for i in range(10)]
+            for future in futures:
+                self.assertEqual(future.result(timeout=5)[0], 200)
+        self.assertEqual(server._load_progress_store()["clip.mp4"], {"t": 9, "d": 10, "ts": 100.009})
 
 
 if __name__ == "__main__":

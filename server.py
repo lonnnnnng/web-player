@@ -130,19 +130,29 @@ def _load_progress_store():
     try:
         with open(PROGRESS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        if not isinstance(data, dict) or any(
+                not isinstance(rec, dict) or not all(
+                    _valid_progress_num(rec.get(key)) for key in ("t", "d", "ts"))
+                for rec in data.values()):
+            raise ValueError("invalid progress store")
+        return data
+    except FileNotFoundError:
+        # long: 首次运行允许没有记录文件；损坏、权限和其他读取错误不能伪装成空记录后覆盖原文件。
         return {}
 
 
 def _save_progress_store(store):
     tmp = PROGRESS_PATH + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(store, f, ensure_ascii=False)
-        os.replace(tmp, PROGRESS_PATH)
-    except OSError:
-        pass
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, allow_nan=False)
+        f.flush()
+        os.fsync(f.fileno())
+    # long: 只有完整写入并原子替换成功才确认同步；失败交给 HTTP 层通知客户端重试。
+    os.replace(tmp, PROGRESS_PATH)
+
+
+def _valid_progress_num(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) < 1e15
 
 
 def natural_key(s):
@@ -380,8 +390,13 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
     # ---------- API: 播放进度（跨设备同步） ----------
 
     def api_progress_get(self):
-        with PROGRESS_LOCK:
-            store = _load_progress_store()
+        try:
+            with PROGRESS_LOCK:
+                store = _load_progress_store()
+        except (OSError, ValueError) as exc:
+            self.log_error("读取播放记录失败: %s", exc)
+            self.send_error_json(503, "播放记录暂时无法读取，请稍后重试")
+            return
         self.send_json({"items": store})
 
     def api_progress_post(self):
@@ -397,36 +412,40 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.send_error_json(400, "bad request")
             return
 
-        def valid_num(v):
-            return isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e15
-
-        with PROGRESS_LOCK:
-            store = _load_progress_store()
-            for it in items[:1000]:
-                if not isinstance(it, dict) or not isinstance(it.get("path"), str):
-                    continue
-                path = normalize_relative_path(it["path"])
-                if not path:
-                    continue
-                ext = os.path.splitext(path)[1].lower()
-                if ext not in VIDEO_EXTS and ext not in AUDIO_EXTS:
-                    continue
-                t, d, ts = it.get("t"), it.get("d"), it.get("ts")
-                if not (valid_num(t) and valid_num(d) and valid_num(ts)):
-                    continue
-                t, d, ts = float(t), float(d), float(ts)
-                if d <= 0 or t < 0:
-                    # long: 清除动作不依赖文件是否仍存在，媒体被移走后也能删掉跨设备旧进度。
-                    store.pop(path, None)
-                    continue
-                # long: 新进度只属于当前资源目录中的真实媒体，避免任意键长期写入 JSON 文件。
-                if not os.path.isfile(self.resolve_under_root(path) or ""):
-                    continue
-                # long: 客户端异常或恶意提交的超长进度不能污染首页比例，统一限制在媒体总时长内。
-                store[path] = {"t": round(min(t, d), 1), "d": round(d, 1),
-                               "ts": int(ts) or int(time.time())}
-            _save_progress_store(store)
-        self.send_json({"ok": True})
+        confirmed, rejected = {}, []
+        try:
+            with PROGRESS_LOCK:
+                store = _load_progress_store()
+                for it in items[:1000]:
+                    if not isinstance(it, dict) or not isinstance(it.get("path"), str):
+                        continue
+                    path = normalize_relative_path(it["path"])
+                    t, d, ts = it.get("t"), it.get("d"), it.get("ts")
+                    if (not path or os.path.splitext(path)[1].lower() not in VIDEO_EXTS | AUDIO_EXTS
+                            or not all(_valid_progress_num(v) for v in (t, d, ts))):
+                        rejected.append(it["path"])
+                        continue
+                    t, d, ts = float(t), float(d), float(ts)
+                    deleted = d <= 0 or t < 0
+                    if not deleted and not os.path.isfile(self.resolve_under_root(path) or ""):
+                        rejected.append(it["path"])
+                        continue
+                    rec = {"t": 0 if deleted else round(min(t, d), 1),
+                           "d": 0 if deleted else round(d, 1), "ts": ts if ts > 0 else time.time()}
+                    old = store.get(path)
+                    # long: 秒时间戳兼容旧客户端，并保留新客户端毫秒精度；乱序和重试不能回退已保存进度。
+                    # 同版本删除优先，其他冲突保留先落盘版本，重试相同数据不产生新版本。
+                    if (old is None or rec["ts"] > old["ts"]
+                            or (rec["ts"] == old["ts"] and deleted and old["d"] > 0)):
+                        # long: 删除也保留版本墓碑，离线设备上传的旧记录才不会使清除操作失效。
+                        store[path] = rec
+                    confirmed[it["path"]] = store[path]
+                _save_progress_store(store)
+        except (OSError, ValueError) as exc:
+            self.log_error("保存播放记录失败: %s", exc)
+            self.send_error_json(503, "播放记录保存失败，请稍后重试")
+            return
+        self.send_json({"ok": True, "items": confirmed, "rejected": rejected})
 
     # ---------- API: 文件流（支持 Range） ----------
 
@@ -649,6 +668,7 @@ def main():
     parser.add_argument("--host", default=None, help="监听地址，默认 0.0.0.0")
     parser.add_argument("--password", help="访问密码（HTTP Basic，留空则不启用）")
     parser.add_argument("--print-ip", action="store_true", help="打印本机局域网 IP 后退出（供启动脚本调用）")
+    parser.add_argument("--instance-token", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.print_ip:
