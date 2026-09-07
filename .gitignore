@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+node_modules/
 
 # 运行时产物
 player.log

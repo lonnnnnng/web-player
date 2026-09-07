@@ -26,9 +26,11 @@ async (page) => {
   check(first.volume === 1 && !first.muted && first.coarse && first.touch > 0, "首次音量或触屏环境错误");
   results.push({ case: "fresh-mobile-sound", ...first });
 
+  // long: 隔离服务可能已被 UI 回归使用，先清除这一条样本，避免把历史记录误判成持续播放新写入。
+  await page.evaluate(async path => { removeProgress(path); await progressSync.push(); }, mp3);
   await watch(mp3);
-  await page.getByRole("button", { name: "声音 开", exact: true }).click();
-  await page.getByRole("button", { name: "声音 关", exact: true }).click();
+  await page.getByRole("button", { name: "静音", exact: true }).click();
+  await page.getByRole("button", { name: "开启声音", exact: true }).click();
   await page.evaluate(async () => { video.currentTime = 0; await video.play(); });
   await page.waitForFunction(() => video.currentTime >= 7, null, { timeout: 15000 });
   // long: 以实际服务端确认作为完成条件，避免恰好在第二次发送前的毫秒边界读取旧回包。
@@ -42,15 +44,15 @@ async (page) => {
     } while (Date.now() < deadline);
     return { time: video.currentTime, paused: video.paused, local: progressSync.read(currentWatchPath), server: rec };
   });
-  check(!continuous.paused && continuous.local?.t >= 3 && continuous.server?.t >= 3,
+  check(!continuous.paused && continuous.local?.t >= 3 && continuous.local?.t < 20 && continuous.server?.t >= 3 && continuous.server?.t < 20,
     "持续播放没有定时保存并同步: " + JSON.stringify(continuous));
   results.push({ case: "continuous-mp3-progress", ...continuous });
   await page.evaluate(async () => { video.pause(); await progressSync.push(); video.volume = 0; video.muted = false; });
-  await page.getByRole("button", { name: "声音 关", exact: true }).click();
+  await page.getByRole("button", { name: "开启声音", exact: true }).click();
   check(await page.evaluate(() => video.volume === 1 && !video.muted && storage.getItem("vp-muted") === "0"), "零音量首次点击未恢复");
   results.push({ case: "zero-volume-one-click", passed: true });
 
-  await page.getByRole("button", { name: "下一集 ›", exact: true }).click();
+  await page.getByRole("button", { name: "下一首", exact: true }).click();
   await page.waitForFunction(path => currentWatchPath === path && video.readyState >= 1 && video.duration > 1000, m4a);
   await page.evaluate(async () => { video.currentTime = 20; await video.play(); });
   await page.waitForFunction(() => video.currentTime > 21);

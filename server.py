@@ -16,6 +16,7 @@
 
 import argparse
 import base64
+import heapq
 import json
 import os
 import re
@@ -228,6 +229,8 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             self.api_list(query)
         elif path == "/api/search":
             self.api_search(query)
+        elif path == "/api/library":
+            self.api_library(query)
         elif path == "/api/progress":
             self.api_progress_get()
         elif path == "/api/file":
@@ -345,6 +348,59 @@ class VideoRequestHandler(BaseHTTPRequestHandler):
             "audios": audios,
             "subs": subs,
         })
+
+    def api_library(self, query):
+        kind = query.get("kind", ["all"])[0]
+        order = query.get("sort", ["newest"])[0]
+        try:
+            offset = int(query.get("offset", ["0"])[0])
+            limit = int(query.get("limit", ["60"])[0])
+            if kind not in ("all", "video", "audio") or order not in ("newest", "name", "size"):
+                raise ValueError
+            if not 0 <= offset <= 100000 or not 1 <= limit <= 100:
+                raise ValueError
+        except ValueError:
+            self.send_error_json(400, "媒体筛选参数无效")
+            return
+        root = CONFIG["video_dir"]
+        if not os.path.isdir(root):
+            self.send_error_json(404, "资源目录不存在")
+            return
+        counts = {"video": 0, "audio": 0}
+
+        def media_items():
+            for directory, dirs, files in os.walk(root):
+                # long: 全库视图不能展示目录外的链接或隐藏资源，和文件读取使用相同安全边界。
+                dirs[:] = [d for d in dirs if not d.startswith(".") and not os.path.islink(os.path.join(directory, d))]
+                for name in files:
+                    ext = os.path.splitext(name)[1].lower()
+                    if name.startswith(".") or ext not in VIDEO_EXTS | AUDIO_EXTS:
+                        continue
+                    rel = os.path.relpath(os.path.join(directory, name), root).replace(os.sep, "/")
+                    target = self.resolve_under_root(rel)
+                    if not target:
+                        continue
+                    try:
+                        st = os.stat(target)
+                        if not os.path.isfile(target):
+                            continue
+                    except OSError:
+                        continue
+                    media_kind = "audio" if ext in AUDIO_EXTS else "video"
+                    counts[media_kind] += 1
+                    if kind == "all" or kind == media_kind:
+                        yield {"path": rel, "name": name, "type": "file", "kind": media_kind,
+                               "ext": ext[1:], "size": st.st_size, "mtime": int(st.st_mtime)}
+
+        def sort_key(item):
+            primary = -item["mtime"] if order == "newest" else -item["size"] if order == "size" else 0
+            return primary, natural_key(item["name"]), item["path"]
+
+        # long: 分页只保留当前窗口所需的最前结果，大资源库不必把全部媒体同时传给手机或存进排序数组。
+        items = heapq.nsmallest(offset + limit, media_items(), key=sort_key)
+        total = sum(counts.values()) if kind == "all" else counts[kind]
+        self.send_json({"items": items[offset:], "counts": counts, "total": total,
+                        "offset": offset, "has_more": offset + limit < total})
 
     # ---------- API: 全库搜索 ----------
 

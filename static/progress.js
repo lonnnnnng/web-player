@@ -12,9 +12,15 @@
   const newer = (a, b) => !valid(b) || a.ts > b.ts || (a.ts === b.ts && deleted(a) && !deleted(b));
 
   function createProgressSync({ storage, fetch: request, beacon, now = Date.now,
-    setTimer = setTimeout, clearTimer = clearTimeout, onChange = () => {} }) {
+    setTimer = setTimeout, clearTimer = clearTimeout, onChange = () => {}, onStatus = () => {} }) {
     const dirty = new Map();
     let timer = null, inFlight = null, retryDelay = 1000;
+    let reachable = null, pulling = false;
+
+    function notifyStatus() {
+      // long: 只有服务端确认成功且没有待上传记录时显示已同步，不能把本地保存当成网络成功。
+      onStatus(reachable === false ? "offline" : inFlight || pulling ? "syncing" : dirty.size ? "pending" : reachable ? "synced" : "pending");
+    }
 
     function read(path) {
       try { return JSON.parse(storage.getItem(PREFIX + path)); } catch { return null; }
@@ -45,6 +51,7 @@
       persistQueue();
       storage.setItem(PREFIX + path, JSON.stringify(rec));
       schedule();
+      notifyStatus();
     }
     function write(path, t, d) {
       if (!path || !Number.isFinite(t) || !Number.isFinite(d) || d < 0 || t < 0) return;
@@ -91,16 +98,20 @@
           }
           persistQueue();
           retryDelay = 1000;
+          reachable = true;
           onChange();
         } catch {
           // long: 断网、超时和写盘失败都保留队列；刷新后仍可重试，避免假成功丢进度。
           retryDelay = Math.min(retryDelay * 2, 30000);
+          reachable = false;
         } finally {
           clearTimer(timeout);
           inFlight = null;
           schedule(retryDelay);
+          notifyStatus();
         }
       });
+      notifyStatus();
       return inFlight;
     }
     function flushBeacon() {
@@ -120,11 +131,13 @@
       push();
     }
     async function pull() {
+      pulling = true;
+      notifyStatus();
       try {
         const res = await request("/api/progress");
-        if (!res.ok) return;
+        if (!res.ok) throw new Error("progress HTTP " + res.status);
         const { items } = await res.json();
-        if (!items || typeof items !== "object" || Array.isArray(items)) return;
+        if (!items || typeof items !== "object" || Array.isArray(items)) throw new Error("invalid progress response");
         for (const [path, rec] of Object.entries(items)) merge(path, rec);
         // long: 兼容旧版本只落本地、没成功上传的进度；服务端删除标记会先合并，防止旧记录复活。
         for (const key of storage.keys()) {
@@ -134,8 +147,14 @@
         }
         persistQueue();
         schedule();
+        reachable = true;
         onChange();
-      } catch { /* long: 拉取失败不影响本地播放，联网或返回前台时再试。 */ }
+      } catch {
+        reachable = false;
+      } finally {
+        pulling = false;
+        notifyStatus();
+      }
     }
     return { read, write, remove: path => write(path, 0, 0), push, pull, flushBeacon,
       start() { schedule(); return pull(); } };

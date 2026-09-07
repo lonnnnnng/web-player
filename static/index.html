@@ -2,86 +2,105 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#0f1117">
-<title>本地音视频播放器</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#f7f8fa">
+<meta name="color-scheme" content="light dark">
+<title>本地播放器 · 媒体库</title>
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-
-<!-- ===== 浏览页 ===== -->
-<div id="browse-page" class="page">
-  <header class="topbar">
-    <div class="brand">
-      <svg class="logo" viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" fill="#6c5ce7"/><path d="M10 9l6 3-6 3V9z" fill="#fff"/></svg>
-      <span>本地音视频播放器</span>
-    </div>
-    <input id="search-box" type="search" placeholder="搜索全部资源…" aria-label="搜索全部资源" autocomplete="off">
-  </header>
-
-  <div class="content">
-    <div id="resume-row" class="resume-section hidden">
-      <div class="resume-title">▶ 继续观看</div>
-      <div id="resume-cards" class="resume-cards"></div>
-    </div>
-    <nav id="breadcrumb" class="breadcrumb"></nav>
-    <div class="list-meta" id="list-meta" aria-live="polite"></div>
-    <div id="file-grid" class="file-grid" aria-live="polite"></div>
-    <div id="empty-tip" class="empty-tip hidden">
-      <div class="empty-icon">🎬</div>
-      <p id="empty-text">这个目录还没有音视频文件</p>
-    </div>
-  </div>
-</div>
-
-<!-- ===== 播放页 ===== -->
-<div id="player-page" class="page hidden">
-  <div class="player-topbar">
-    <button id="btn-back" class="btn-back" title="返回 (Esc)">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-      返回
-    </button>
-    <div id="player-title" class="player-title"></div>
-    <div class="player-actions">
-      <button id="btn-mute" class="btn-back" title="静音/取消静音 (M)">声音 开</button>
-      <button id="btn-autonext" class="btn-back" title="播完自动播放同目录下一个">连播 开</button>
-      <button id="btn-next" class="btn-back hidden" title="播放下一个 (N)">下一集 ›</button>
-      <select id="speed-select" class="speed-select" title="播放速度">
-        <option value="0.5">0.5x</option>
-        <option value="0.75">0.75x</option>
-        <option value="1" selected>1x</option>
-        <option value="1.25">1.25x</option>
-        <option value="1.5">1.5x</option>
-        <option value="2">2x</option>
-        <option value="3">3x</option>
-      </select>
-    </div>
-  </div>
-
-  <div class="player-wrap">
-    <div id="audio-cover" class="audio-cover hidden">
-      <div class="cover-art">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M9 18.5a2.5 2.5 0 1 1-2-2.45V6.2a1 1 0 0 1 .76-.97l8.5-2.1A1 1 0 0 1 17.5 4.1v10.95a2.5 2.5 0 1 1-2-2.45V6.53l-6.5 1.6v10.37z" fill="currentColor"/><path d="M9 7.6l8.5-2.1v1.55L9 9.15V7.6z" fill="currentColor" opacity=".55"/></svg>
+<div id="browse-page" class="page browse-shell">
+  <aside class="sidebar">
+    <a href="#/" class="brand" aria-label="本地播放器首页">
+      <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#audio-lines"/></svg></span>
+      <span>本地播放器<small>PERSONAL MEDIA</small></span>
+    </a>
+    <div class="nav-label">我的媒体</div>
+    <nav class="side-nav" aria-label="主导航">
+      <a href="#/" data-view="library"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#library"/></svg><span>媒体库</span></a>
+      <a href="#/?view=recent" data-view="recent"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#history"/></svg><span>最近播放</span></a>
+      <a href="#/?view=folders" data-view="folders"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#folder"/></svg><span>文件夹</span></a>
+    </nav>
+    <div class="sidebar-foot"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#headphones"/></svg><span>每一段，都值得回味。<small>YOUR LIBRARY. YOUR PACE.</small></span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <a href="#/" class="mobile-brand" aria-label="本地播放器首页"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#audio-lines"/></svg><span>本地播放器</span></a>
+      <div class="search-field">
+        <svg class="icon" aria-hidden="true"><use href="/static/icons.svg#search"/></svg>
+        <input id="search-box" type="search" placeholder="搜索视频、音频、文件夹" aria-label="搜索全部资源" autocomplete="off">
+        <button id="search-clear" class="icon-button hidden" aria-label="清空搜索" title="清空搜索"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#x"/></svg></button>
       </div>
-      <div class="cover-meta">
-        <div id="audio-title" class="cover-title"></div>
-        <div class="cover-sub">正在播放音频</div>
-        <div class="eq" id="eq-bars"><span></span><span></span><span></span><span></span><span></span></div>
+      <div class="header-actions">
+        <div id="sync-status" class="sync-status" role="status" title="正在读取播放记录"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#cloud-upload"/></svg><span>连接中</span></div>
+        <button id="theme-toggle" class="icon-button" title="切换深色模式" aria-label="切换深色模式"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#moon"/></svg></button>
       </div>
-    </div>
-    <video id="video" controls autoplay playsinline></video>
-    <div id="resume-toast" class="resume-toast hidden"></div>
-    <div id="video-error" class="video-error hidden">
-      <div class="video-error-title">⚠️ 无法播放</div>
-      <div id="video-error-text" class="video-error-text"></div>
-    </div>
+    </header>
+    <main class="content" id="main-content">
+      <nav id="breadcrumb" class="breadcrumb hidden" aria-label="文件夹路径"></nav>
+      <div class="page-heading">
+        <div><p id="browse-eyebrow" class="eyebrow">YOUR COLLECTION</p><h1 id="browse-title">媒体库</h1><p id="list-meta" class="list-meta" aria-live="polite">正在读取媒体...</p></div>
+        <button id="refresh-library" class="icon-button refresh-button" title="刷新媒体库" aria-label="刷新媒体库"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#refresh-cw"/></svg></button>
+      </div>
+      <section id="resume-row" class="resume-section hidden" aria-labelledby="resume-heading">
+        <div class="section-heading"><h2 id="resume-heading">继续播放</h2><a href="#/?view=recent">全部记录<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#chevron-right"/></svg></a></div>
+        <div id="resume-cards" class="resume-cards"></div>
+      </section>
+      <div class="library-toolbar">
+        <div class="kind-tabs" role="group" aria-label="媒体类型">
+          <button data-kind="all" aria-pressed="true">全部<span id="count-all">0</span></button>
+          <button data-kind="video" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#film"/></svg>视频<span id="count-video">0</span></button>
+          <button data-kind="audio" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#music"/></svg>音频<span id="count-audio">0</span></button>
+        </div>
+        <div class="view-tools">
+          <label class="sort-control"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#arrow-down-wide-narrow"/></svg><select id="sort-select" aria-label="排序方式"><option value="newest">最近修改</option><option value="name">名称排序</option><option value="size">文件大小</option></select></label>
+          <div class="view-switch" role="group" aria-label="显示方式"><button id="view-grid" class="icon-button" aria-label="网格视图" aria-pressed="true" title="网格视图"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#layout-grid"/></svg></button><button id="view-list" class="icon-button" aria-label="列表视图" aria-pressed="false" title="列表视图"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#list"/></svg></button></div>
+        </div>
+      </div>
+      <div id="folder-grid" class="folder-grid"></div>
+      <div id="file-grid" class="file-grid" aria-label="媒体文件" aria-busy="false"></div>
+      <div id="empty-tip" class="empty-tip hidden" role="status"><span class="empty-icon"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#library"/></svg></span><h2 id="empty-title">还没有媒体</h2><p id="empty-text">这个目录还没有音视频文件</p><button id="empty-retry" class="text-button hidden"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#refresh-cw"/></svg>重新加载</button></div>
+      <div class="load-more-wrap"><button id="load-more" class="text-button hidden">加载更多<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#chevron-right"/></svg></button></div>
+    </main>
+    <footer class="library-footer"><span>本地播放器</span><span>只属于你的视听时光</span></footer>
   </div>
+  <nav class="mobile-nav" aria-label="手机导航">
+    <a href="#/" data-view="library"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#library"/></svg><span>媒体库</span></a>
+    <a href="#/?view=recent" data-view="recent"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#history"/></svg><span>最近播放</span></a>
+    <a href="#/?view=folders" data-view="folders"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#folder"/></svg><span>文件夹</span></a>
+  </nav>
 </div>
-
+<div id="player-page" class="page player-page hidden">
+  <header class="player-topbar"><button id="btn-back" class="text-button" title="返回" aria-label="返回"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#arrow-left"/></svg><span>返回</span></button><div class="player-location"><span id="player-kind">视频</span><span class="location-separator">/</span><span id="player-parent">媒体库</span></div><a class="icon-button" href="#/" aria-label="媒体库" title="媒体库"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#library"/></svg></a></header>
+  <main class="player-layout">
+    <section class="playback-main" aria-label="播放器">
+      <div class="player-wrap">
+        <div id="audio-cover" class="audio-cover hidden">
+          <div class="record-art" aria-hidden="true"><div class="record-label"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#audio-lines"/></svg><span id="artwork-format">AUDIO</span></div></div>
+          <div class="cover-meta"><p class="eyebrow">NOW LISTENING</p><h1 id="audio-title"></h1><div class="audio-state"><div class="eq" id="eq-bars" aria-hidden="true"><span></span><span></span><span></span><span></span></div><span id="audio-status">正在加载</span></div></div>
+        </div>
+        <video id="video" controls autoplay playsinline preload="metadata"></video>
+      </div>
+      <div id="resume-toast" class="resume-toast hidden" role="status"></div>
+      <div id="video-error" class="video-error hidden" role="alert"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#circle-alert"/></svg><div><h2>暂时无法播放</h2><p id="video-error-text"></p><button id="retry-playback" class="text-button"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#refresh-cw"/></svg>重新加载</button></div></div>
+      <div id="audio-controls" class="audio-controls hidden">
+        <input id="seek-range" class="seek-range" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度" disabled>
+        <div class="time-labels"><span id="elapsed-time">0:00</span><span id="duration-time">0:00</span></div>
+        <div class="transport"><button id="btn-prev" class="icon-button" title="上一首" aria-label="上一首" disabled><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#skip-back"/></svg></button><button id="seek-back" class="icon-button seek-button" title="后退 10 秒" aria-label="后退 10 秒"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#rotate-ccw"/></svg><small>10</small></button><button id="btn-play" class="play-button" title="播放" aria-label="播放"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#play"/></svg></button><button id="seek-forward" class="icon-button seek-button" title="前进 10 秒" aria-label="前进 10 秒"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#rotate-cw"/></svg><small>10</small></button><button id="audio-next" class="icon-button" title="下一首" aria-label="下一首" disabled><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#skip-forward"/></svg></button></div>
+      </div>
+      <div class="player-info"><div><h1 id="player-title"></h1><p id="media-details" class="media-details"></p></div><button id="btn-next" class="text-button hidden" title="播放下一个" aria-label="播放下一个">下一个<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#skip-forward"/></svg></button></div>
+      <div class="playback-options"><div class="volume-control"><button id="btn-mute" class="icon-button" title="静音" aria-label="静音"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#volume-2"/></svg></button><input id="volume-range" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量"></div><label class="speed-control">倍速<select id="speed-select" aria-label="播放速度"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option><option value="3">3x</option></select></label><div class="autonext-control"><span>自动连播</span><button id="btn-autonext" class="switch" role="switch" aria-checked="true" aria-label="自动连播" title="自动连播"><span></span></button></div></div>
+    </section>
+    <aside class="queue-panel" aria-labelledby="queue-heading"><div class="section-heading"><h2 id="queue-heading">播放列表 <span id="queue-count">0</span></h2><a id="queue-directory" class="icon-button" href="#/?view=folders" aria-label="打开所在文件夹" title="打开所在文件夹"><svg class="icon" aria-hidden="true"><use href="/static/icons.svg#folder-open"/></svg></a></div><p id="queue-caption" class="queue-caption">同一文件夹</p><div id="queue-items" class="queue-items"></div></aside>
+  </main>
+</div>
+<div id="action-feedback" class="action-feedback hidden" role="status"></div>
 <script src="/static/utils.js"></script>
 <script src="/static/progress.js"></script>
+<script src="/static/catalog.js"></script>
+<script src="/static/player-ui.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

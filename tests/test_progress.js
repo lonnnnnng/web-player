@@ -45,6 +45,27 @@ test("acknowledged progress clears only after server success", async () => {
   assert.equal(h.sync.read("clip.mp4").t, 9);
 });
 
+test("sync status distinguishes local queue, confirmation and offline failure", async () => {
+  const states = [];
+  const h = harness({ onStatus: state => states.push(state) });
+  await h.sync.pull();
+  assert.equal(states.at(-1), "synced");
+  h.sync.write("clip.mp4", 3, 10);
+  assert.equal(states.at(-1), "pending");
+  const pushing = h.sync.push();
+  assert.equal(states.at(-1), "syncing");
+  await pushing;
+  assert.equal(states.at(-1), "synced");
+  const offlineStates = [];
+  const offline = harness({ fetch: async () => ({ ok: false, status: 503 }), onStatus: state => offlineStates.push(state) });
+  await offline.sync.pull();
+  assert.equal(offlineStates.at(-1), "offline");
+  offline.sync.write("clip.mp4", 4, 10);
+  await offline.sync.push();
+  assert.equal(offlineStates.at(-1), "offline");
+  assert.equal(offline.pending().length, 1);
+});
+
 test("HTTP errors and invalid acknowledgments retain a durable retry queue", async () => {
   for (const response of [{ ok: false, status: 503 }, { ok: true, json: async () => ({ ok: true }) }]) {
     const h = harness({ fetch: async () => response });

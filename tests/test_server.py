@@ -116,6 +116,56 @@ class ServerHTTPTest(unittest.TestCase):
         return self.request("POST", "/api/progress", {"Content-Type": "application/json"},
                             json.dumps({"items": [{"path": "clip.mp4", "t": t, "d": d, "ts": ts}]}))
 
+    def test_library_filter_sort_and_pagination(self):
+        os.makedirs(os.path.join(self.root, "album"))
+        for name, size, modified in [("album/track10.mp3", 30, 100), ("album/track2.mp3", 20, 300),
+                                     ("clip2.mp4", 50, 200)]:
+            target = os.path.join(self.root, name)
+            with open(target, "wb") as media:
+                media.write(b"x" * size)
+            os.utime(target, (modified, modified))
+        status, _, body = self.request("GET", "/api/library?kind=audio&sort=name&limit=1")
+        result = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["counts"], {"audio": 2, "video": 2})
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["items"][0]["path"], "album/track2.mp3")
+        self.assertTrue(result["has_more"])
+        _, _, body = self.request("GET", "/api/library?kind=audio&sort=name&limit=1&offset=1")
+        self.assertEqual(json.loads(body)["items"][0]["name"], "track10.mp3")
+        self.assertFalse(json.loads(body)["has_more"])
+        _, _, body = self.request("GET", "/api/library?sort=size")
+        self.assertEqual([item["size"] for item in json.loads(body)["items"]], [50, 30, 20, 10])
+        _, _, body = self.request("GET", "/api/library?kind=audio&sort=newest")
+        self.assertEqual(json.loads(body)["items"][0]["name"], "track2.mp3")
+        _, _, body = self.request("GET", "/api/library?offset=99")
+        self.assertEqual(json.loads(body)["items"], [])
+        self.assertFalse(json.loads(body)["has_more"])
+
+    def test_library_rejects_invalid_filters_and_missing_root(self):
+        for query in ["kind=image", "sort=random", "limit=0", "limit=101", "offset=-1", "offset=100001", "limit=no"]:
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", "/api/library?" + query)[0], 400)
+        server.CONFIG["video_dir"] = os.path.join(self.root, "missing")
+        self.assertEqual(self.request("GET", "/api/library")[0], 404)
+
+    def test_library_excludes_hidden_and_outside_resources(self):
+        with tempfile.TemporaryDirectory() as outside:
+            external = os.path.join(outside, "secret.mp3")
+            with open(external, "wb") as media:
+                media.write(b"private")
+            os.symlink(external, os.path.join(self.root, "linked.mp3"))
+            os.symlink(outside, os.path.join(self.root, "linked-directory"))
+            os.makedirs(os.path.join(self.root, ".private"))
+            for name in [".hidden.mp3", ".private/hidden.mp4", "notes.txt"]:
+                with open(os.path.join(self.root, name), "wb") as media:
+                    media.write(b"hidden")
+            status, _, body = self.request("GET", "/api/library")
+            result = json.loads(body)
+            self.assertEqual(status, 200)
+            self.assertEqual([item["path"] for item in result["items"]], ["clip.mp4"])
+            self.assertEqual(result["counts"], {"video": 1, "audio": 0})
+
     def test_progress_rejects_stale_versions_and_preserves_milliseconds(self):
         self.post_progress(9, 10, 200.123)
         status, _, payload = self.post_progress(1, 10, 200.122)
