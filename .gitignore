@@ -19,3 +19,12 @@ videos/*
 # 本地浏览器验收产物
 output/playwright/
 .playwright-cli/
+
+# Android 本地构建与设备验收
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/build/
+android/.idea/
+android/local-signing/
+output/android/

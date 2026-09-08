@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- long: 用户可配置内网 HTTP 主机，平台白名单无法动态扩展；播放 URI 仍只由已保存的服务地址构建。 -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
